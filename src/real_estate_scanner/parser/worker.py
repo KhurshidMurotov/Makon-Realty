@@ -283,6 +283,7 @@ async def run_worker(bot: Bot, *, interval_seconds: int = 600) -> None:
                         district_city_slug,
                         url,
                     )
+                    logger.info("Финальный URL для Playwright: %s", url)
 
                     ads = await fetch_ads_from_search(url=url, ad_type=ad_type, city=fetch_city_fallback)
                     logger.info(

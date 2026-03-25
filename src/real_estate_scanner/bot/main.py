@@ -14,10 +14,9 @@ from typing import Any
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import CommandStart
 from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup, WebAppInfo
-from aiogram.utils.web_app import WebAppInitData
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from real_estate_scanner.bot.schemas import FilterSchema, parse_payload_json, verify_webapp_init_data
+from real_estate_scanner.bot.schemas import FilterSchema
 from real_estate_scanner.config import settings
 from real_estate_scanner.db.crud import save_filter, upsert_user
 from real_estate_scanner.db.init_db import init_db
@@ -56,27 +55,13 @@ async def webapp_data_handler(message: Message) -> None:
     logger.debug("webapp_data_handler: raw_web_app_data=%s", raw_data_str)
 
     try:
-        payload = parse_payload_json(raw_data_str)
+        payload = json.loads(raw_data_str)
+        if not isinstance(payload, dict):
+            raise ValueError("payload must be an object")
         logger.info("webapp_data_handler: json parsed")
     except Exception:
         logger.exception("webapp_data_handler: cannot parse web_app_data json")
         await message.answer("Ошибка: неверный формат данных. Попробуйте ещё раз.")
-        return
-
-    try:
-        init_data_raw: str | None = payload.get("_auth")
-        if not init_data_raw:
-            raise ValueError("Missing _auth in payload")
-
-        parsed_init: WebAppInitData = verify_webapp_init_data(
-            bot_token=settings.BOT_TOKEN or "",
-            init_data_raw=init_data_raw,
-            expected_user_id=message.from_user.id,
-        )
-        logger.info("webapp_data_handler: initData signature ok (auth_date=%s)", parsed_init.auth_date)
-    except Exception:
-        logger.exception("webapp_data_handler: initData verification failed")
-        await message.answer("Ошибка безопасности: данные не подтверждены Telegram. Попробуйте ещё раз.")
         return
 
     filter_payload: Any = payload.get("filter")
@@ -95,6 +80,7 @@ async def webapp_data_handler(message: Message) -> None:
     # Save to DB
     try:
         user_id = message.from_user.id
+        logger.info("Сохраняю фильтр для юзера %s: тип=%s", user_id, filter_schema.type)
         async with AsyncSessionLocal() as session:
             await upsert_user(session=session, user_id=user_id, username=message.from_user.username)
 

@@ -7,11 +7,9 @@
     <title>Создать фильтр</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
-      /* Visual feedback for selected buttons */
       .active {
-        border-color: rgb(56 189 248) !important;
-        background-color: rgba(56, 189, 248, 0.12) !important;
-        color: rgb(248 250 252) !important;
+        border: 2px solid #38bdf8;
+        background: rgba(56, 189, 248, 0.1);
       }
     </style>
   </head>
@@ -260,8 +258,6 @@
       if (tg) {
         tg.ready();
         tg.expand();
-      } else {
-        console.log("Telegram WebApp не доступен");
       }
 
       // OLX slugs for region/city selectors
@@ -377,8 +373,6 @@
             price_max: priceMax,
             additional_params: buildAdditionalParams(),
           },
-          // aiogram будет валидировать это как initData (если включена проверка)
-          _auth: window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp.initData : null,
         };
       }
 

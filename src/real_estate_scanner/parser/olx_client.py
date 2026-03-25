@@ -59,8 +59,8 @@ _RE_ROOMS_COM = re.compile(r"(?P<rooms>\d+)\s*х\s*ком\b", re.IGNORECASE)
 _RE_ROOMS_COMN = re.compile(r"(?P<rooms>\d+)\s*(?:комн|комнат)\b", re.IGNORECASE)
 _RE_ROOMS_HDOTK = re.compile(r"(?P<rooms>\d+)\s*х\.?\s*к\.?", re.IGNORECASE)  # "х. к."
 _RE_ROOMS_COMN_SHORT = re.compile(r"(?P<rooms>\d+)\s*комн\b", re.IGNORECASE)
-_RE_ROOMS_4_3_5_HONALI = re.compile(
-    r"(?P<rooms>\d)\s*/\s*\d+\s*/\s*\d+\s*(?:хона|хонали|xonali)\b",
+_RE_ROOMS_SLASH_LAYOUT = re.compile(
+    r"(?P<rooms>\d+)\s*/\s*\d+\s*/\s*\d+(?:\s*(?:хона|хонали|xona|xonali))?\b",
     re.IGNORECASE,
 )
 
@@ -71,7 +71,7 @@ _RE_ROOMS_ANY_DIGIT_BEFORE_COM = re.compile(
 
 # Area patterns (strict: must include m2 / кв.м / м² tokens)
 _RE_AREA_UNITS = re.compile(
-    r"(?P<area>\d+(?:[.,]\d+)?)\s*(?:m2|m²|м2|м²|кв\.?\s*м)",
+    r"(?P<area>\d+(?:[.,]\d+)?)\s*(?:m2|м2|м²|кв\.?м)",
     re.IGNORECASE,
 )
 
@@ -87,10 +87,13 @@ def _clean_text_for_parsing(text: str) -> str:
     """
     if not text:
         return ""
-    # Remove braces and keep things regex-friendly.
-    cleaned = text.replace("{", " ").replace("}", " ")
+    # Remove service punctuation and brackets that often break regex parsing.
+    cleaned = re.sub(r"[{}\[\]()]", " ", text)
+    cleaned = re.sub(r"[|]+", " ", cleaned)
     # Normalize weird whitespace to plain spaces.
     cleaned = cleaned.replace("\u00A0", " ").replace("\u202F", " ")
+    cleaned = re.sub(r"[^\w\s/.,:+-]", " ", cleaned, flags=re.UNICODE)
+    cleaned = _normalize_space(cleaned)
     return cleaned
 
 
@@ -119,7 +122,7 @@ def _parse_rooms(text: str) -> int | None:
 
     # Common explicit patterns first
     for pattern in (
-        _RE_ROOMS_4_3_5_HONALI,
+        _RE_ROOMS_SLASH_LAYOUT,
         _RE_ROOMS_HONALI,
         _RE_ROOMS_XONALI,
         _RE_ROOMS_HONA,
