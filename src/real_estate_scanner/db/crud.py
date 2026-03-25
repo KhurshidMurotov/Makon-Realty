@@ -4,7 +4,7 @@ import logging
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
@@ -41,11 +41,15 @@ async def save_filter(session: AsyncSession, user_id: int, filter_data: dict[str
     Сохраняет фильтр пользователя.
 
     Реализация "один активный фильтр на пользователя":
-    - делаем UPSERT по уникальному `filters.user_id`
-    - не создаем новые строки при повторном сохранении
+    - удаляем старый фильтр пользователя
+    - вставляем только один новый актуальный фильтр
     """
     try:
         additional_params = filter_data.get("additional_params") or {}
+        cities = list(filter_data.get("cities") or [])
+        rooms = list(filter_data.get("rooms") or [])
+
+        await session.execute(delete(Filter).where(Filter.user_id == user_id))
 
         stmt = (
             pg_insert(Filter)
@@ -53,27 +57,13 @@ async def save_filter(session: AsyncSession, user_id: int, filter_data: dict[str
                 user_id=user_id,
                 type=filter_data.get("type"),
                 region=filter_data.get("region"),
-                cities=filter_data.get("cities") or [],
-                rooms=filter_data.get("rooms") or [],
+                cities=cities,
+                rooms=rooms,
                 price_min=filter_data.get("price_min"),
                 price_max=filter_data.get("price_max"),
                 area_min=filter_data.get("area_min"),
                 area_max=filter_data.get("area_max"),
                 additional_params=additional_params,
-            )
-            .on_conflict_do_update(
-                index_elements=[Filter.user_id],
-                set_={
-                    "type": filter_data.get("type"),
-                    "region": filter_data.get("region"),
-                    "cities": filter_data.get("cities") or [],
-                    "rooms": filter_data.get("rooms") or [],
-                    "price_min": filter_data.get("price_min"),
-                    "price_max": filter_data.get("price_max"),
-                    "area_min": filter_data.get("area_min"),
-                    "area_max": filter_data.get("area_max"),
-                    "additional_params": additional_params,
-                },
             )
         )
         await session.execute(stmt)

@@ -4,7 +4,7 @@ import asyncio
 import logging
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urljoin
@@ -29,6 +29,11 @@ class ParsedAd:
     ad_type: str
     city: str
     district: str | None = None
+    floor: int | None = None
+    total_floors: int | None = None
+    description: str | None = None
+    author_name: str | None = None
+    created_at_text: str | None = None
 
 
 _TASHKENT_DISTRICT_SLUGS: list[tuple[str, tuple[str, ...]]] = [
@@ -219,6 +224,29 @@ def _parse_olx_id_from_href(href: str) -> str:
     # fallback: last number sequence
     m2 = re.findall(r"\d+", href)
     return m2[-1] if m2 else href
+
+
+def _extract_floor_info(text: str) -> tuple[int | None, int | None]:
+    if not text:
+        return None, None
+    cleaned = _clean_text_for_parsing(text)
+
+    patterns = (
+        re.compile(r"(?P<floor>\d+)\s*/\s*(?P<total>\d+)", re.IGNORECASE),
+        re.compile(r"этаж\s*[:\-]?\s*(?P<floor>\d+)\D+этажн(?:ость)?\s*[:\-]?\s*(?P<total>\d+)", re.IGNORECASE),
+        re.compile(r"этажн(?:ость)?\s*[:\-]?\s*(?P<total>\d+)\D+этаж\s*[:\-]?\s*(?P<floor>\d+)", re.IGNORECASE),
+    )
+    for pattern in patterns:
+        match = pattern.search(cleaned)
+        if not match:
+            continue
+        try:
+            floor = int(match.group("floor"))
+            total = int(match.group("total"))
+        except (TypeError, ValueError):
+            continue
+        return floor, total
+    return None, None
 
 
 def _extract_ads_from_dom_text(
@@ -484,6 +512,103 @@ async def fetch_ads_from_search(
         logger.exception("fetch_ads_from_search failed (url=%s)", url)
 
     return ads
+
+
+async def fetch_ad_details(url: str) -> dict[str, str | int | None]:
+    headless_env = os.getenv("OLX_HEADLESS", "true").strip().lower()
+    headless = headless_env in {"1", "true", "yes", "y", "on"}
+
+    details: dict[str, str | int | None] = {
+        "floor": None,
+        "total_floors": None,
+        "description": None,
+        "author_name": None,
+        "created_at_text": None,
+    }
+
+    try:
+        async with Stealth().use_async(async_playwright()) as p:
+            browser: Browser = await p.chromium.launch(headless=headless)
+            page: Page = await browser.new_page()
+
+            await page.goto(url, wait_until="domcontentloaded")
+            try:
+                await page.wait_for_load_state("networkidle")
+            except Exception:
+                logger.debug("OLX details: wait_for_load_state(networkidle) failed for %s", url)
+
+            await page.wait_for_timeout(1200)
+
+            page_text = await page.locator("body").inner_text()
+            description = None
+            for selector in (
+                '[data-cy="ad_description"]',
+                '[data-testid="ad-description"]',
+                'div[data-testid="description-content"]',
+                "section div",
+            ):
+                try:
+                    candidate = await page.locator(selector).first.inner_text(timeout=1500)
+                except Exception:
+                    continue
+                candidate = _normalize_space(candidate)
+                if candidate and len(candidate) > 20:
+                    description = candidate
+                    break
+
+            author_name = None
+            for selector in (
+                '[data-testid="user-profile-name"]',
+                '[data-cy="seller_card"] h4',
+                '[data-testid="aside"] h4',
+                "aside h4",
+            ):
+                try:
+                    candidate = await page.locator(selector).first.inner_text(timeout=1500)
+                except Exception:
+                    continue
+                candidate = _normalize_space(candidate)
+                if candidate:
+                    author_name = candidate
+                    break
+
+            created_at_text = None
+            created_match = re.search(
+                r"(?:Опубликовано|Размещено|Создано)\s*[:\-]?\s*([^\n]+)",
+                page_text or "",
+                re.IGNORECASE,
+            )
+            if created_match:
+                created_at_text = _normalize_space(created_match.group(1))
+
+            floor, total_floors = _extract_floor_info(page_text)
+
+            details.update(
+                {
+                    "floor": floor,
+                    "total_floors": total_floors,
+                    "description": description,
+                    "author_name": author_name,
+                    "created_at_text": created_at_text,
+                }
+            )
+            await browser.close()
+    except Exception:
+        logger.exception("fetch_ad_details failed (url=%s)", url)
+
+    return details
+
+
+async def enrich_ad_with_details(ad: ParsedAd) -> ParsedAd:
+    details = await fetch_ad_details(ad.link)
+    return replace(
+        ad,
+        floor=details.get("floor"),
+        total_floors=details.get("total_floors"),
+        description=details.get("description"),
+        author_name=details.get("author_name"),
+        created_at_text=details.get("created_at_text"),
+    )
 
 
 def build_search_url(*, ad_type: str, city_slug: str) -> str:

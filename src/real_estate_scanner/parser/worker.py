@@ -14,7 +14,7 @@ from real_estate_scanner.db.crud import add_ad, get_users_for_ad, is_new_ad
 from real_estate_scanner.db.init_db import init_db
 from real_estate_scanner.db.models import Filter, User
 from real_estate_scanner.db.session import AsyncSessionLocal
-from real_estate_scanner.parser.olx_client import ParsedAd, build_search_url, fetch_ads_from_search
+from real_estate_scanner.parser.olx_client import ParsedAd, build_search_url, enrich_ad_with_details, fetch_ads_from_search
 
 logger = logging.getLogger(__name__)
 
@@ -32,24 +32,24 @@ def _display_city_name(city_slug: str | None) -> str:
 
 
 def _build_html_notification(ad: ParsedAd) -> str:
-    layout = f"{ad.rooms}-комн" if ad.rooms is not None else "—-комн"
+    rooms_value = str(ad.rooms) if ad.rooms is not None else "—"
+    floor_value = str(ad.floor) if ad.floor is not None else "—"
+    total_floors_value = str(ad.total_floors) if ad.total_floors is not None else "—"
     area_value = f"{ad.area:g}" if ad.area is not None else "—"
     district_name = escape(ad.district or _display_city_name(ad.city) or "Район не указан")
     price_usd = int(ad.price / settings.USD_TO_SUM_RATE) if settings.USD_TO_SUM_RATE > 0 else ad.price
     price_per_m2 = round(price_usd / ad.area) if ad.area else 0
-    market_price = price_usd
-    description_short = escape((ad.title or "").strip() or "Описание не указано")
-    author = "Не указан"
-    created_at = "Не указано"
+    description = escape((ad.description or ad.title or "").strip() or "Описание не указано")
+    author = escape(ad.author_name or "Не указан")
+    created_at = escape(ad.created_at_text or "Не указано")
 
     return "\n".join(
         [
-            f"{escape(layout)}, {escape(area_value)} m²",
+            f"{rooms_value}/{floor_value}/{total_floors_value}, {escape(area_value)} m²",
             f"Ташкент, {district_name}",
             f"${price_usd} ({price_per_m2} $/m²)",
-            f"Рыночная цена: ${market_price}",
             "",
-            description_short,
+            description,
             "",
             f"От: {author}",
             f"Создано: {created_at}",
@@ -97,16 +97,18 @@ async def _get_distinct_filter_targets_v2(session: AsyncSession) -> list[tuple[s
     """
     Возвращает уникальные тройки (type, region, city_district) для парсинга.
     """
-    stmt = select(Filter.type, Filter.region, Filter.cities).where(
+    out: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    stmt = select(Filter).where(
         Filter.type.is_not(None),
         Filter.region.is_not(None),
         Filter.cities.is_not(None),
-    ).distinct()
+    )
     res = await session.execute(stmt)
-    rows = res.all()
-    out: list[tuple[str, str, str]] = []
-    seen: set[tuple[str, str, str]] = set()
-    for ad_type, region, cities in rows:
+    for flt in res.scalars().all():
+        ad_type = flt.type
+        region = flt.region
+        cities = list(flt.cities or [])
         for city in cities or []:
             if ad_type and region and city:
                 item = (ad_type, region, city)
@@ -287,7 +289,7 @@ async def _notify_users_for_ad(*, bot: Bot, session: AsyncSession, ad: ParsedAd)
             logger.exception("Failed to send ad notification (user_id=%s, olx_id=%s)", user_id, ad.olx_id)
 
 
-async def run_worker(bot: Bot, *, interval_seconds: int = 600) -> None:
+async def run_worker(bot: Bot, *, interval_seconds: int = 200) -> None:
     """
     Бесконечный воркер: каждые 10 минут парсит OLX и отправляет уведомления.
     """
@@ -342,7 +344,9 @@ async def run_worker(bot: Bot, *, interval_seconds: int = 600) -> None:
                     logger.info("Найдено новых объявлений: %s", len(new_ads))
 
                     for ad in new_ads:
-                        await _notify_users_for_ad(bot=bot, session=session, ad=ad)
+                        detailed_ad = await enrich_ad_with_details(ad)
+                        await _notify_users_for_ad(bot=bot, session=session, ad=detailed_ad)
+                        await asyncio.sleep(1.5)
 
         except asyncio.CancelledError:
             logger.info("Worker cancelled")
