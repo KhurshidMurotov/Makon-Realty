@@ -31,13 +31,12 @@ class ParsedAd:
     district: str | None = None
 
 
-_TASHKENT_DISTRICT_SLUGS: list[tuple[str, str]] = [
-    ("Яшнабад", "yashnabadskiy"),
-    ("Юнусабад", "yunusabadskiy"),
-    ("Мирзо-Улугбек", "mirzoulugbek"),
-    ("Мирзо", "mirzoulugbek"),  # fallback substring
-    ("Чиланзар", "chilanzarskiy"),
-    ("Яккасарай", "yakkasarayskiy"),
+_TASHKENT_DISTRICT_SLUGS: list[tuple[str, tuple[str, ...]]] = [
+    ("yashnabadskiy", ("Яшнабад", "Яшнабод")),
+    ("yunusabadskiy", ("Юнусабад",)),
+    ("mirzoulugbek", ("Мирзо-Улугбек", "Мирзо Улугбек", "М.Улугбек", "М-Улугбек", "Мирзо")),
+    ("chilanzarskiy", ("Чиланзар",)),
+    ("yakkasarayskiy", ("Яккасарай",)),
 ]
 
 
@@ -55,6 +54,9 @@ _RE_PRICE_ANY = re.compile(r"([\d\s\u00A0]+)")
 _RE_ROOMS_HONA = re.compile(r"(?P<rooms>\d+)\s*(?:хона|xona)\b", re.IGNORECASE)
 _RE_ROOMS_HONALI = re.compile(r"(?P<rooms>\d+)\s*хонали\b", re.IGNORECASE)
 _RE_ROOMS_XONALI = re.compile(r"(?P<rooms>\d+)\s*xonali\b", re.IGNORECASE)
+_RE_ROOMS_DASH_COMN = re.compile(r"(?P<rooms>\d+)\s*-\s*комн\b", re.IGNORECASE)
+_RE_ROOMS_KOMNATNAYA = re.compile(r"(?P<rooms>\d+)\s*-\s*комнатн(?:ая|ую|ой)\b", re.IGNORECASE)
+_RE_ROOMS_4X_COM = re.compile(r"(?P<rooms>\d+)\s*[хx]\s*ком\b", re.IGNORECASE)
 _RE_ROOMS_COM = re.compile(r"(?P<rooms>\d+)\s*х\s*ком\b", re.IGNORECASE)
 _RE_ROOMS_COMN = re.compile(r"(?P<rooms>\d+)\s*(?:комн|комнат)\b", re.IGNORECASE)
 _RE_ROOMS_HDOTK = re.compile(r"(?P<rooms>\d+)\s*х\.?\s*к\.?", re.IGNORECASE)  # "х. к."
@@ -71,7 +73,7 @@ _RE_ROOMS_ANY_DIGIT_BEFORE_COM = re.compile(
 
 # Area patterns (strict: must include m2 / кв.м / м² tokens)
 _RE_AREA_UNITS = re.compile(
-    r"(?P<area>\d+(?:[.,]\d+)?)\s*(?:m2|м2|м²|кв\.?м)",
+    r"(?P<area>\d+(?:[.,]\d+)?)\s*(?:m2|м2|м²|кв\.?\s*м)",
     re.IGNORECASE,
 )
 
@@ -87,8 +89,9 @@ def _clean_text_for_parsing(text: str) -> str:
     """
     if not text:
         return ""
+    cleaned = text.replace("m²", "m2").replace("м²", "m2")
     # Remove service punctuation and brackets that often break regex parsing.
-    cleaned = re.sub(r"[{}\[\]()]", " ", text)
+    cleaned = re.sub(r"[{}\[\]()]", " ", cleaned)
     cleaned = re.sub(r"[|]+", " ", cleaned)
     # Normalize weird whitespace to plain spaces.
     cleaned = cleaned.replace("\u00A0", " ").replace("\u202F", " ")
@@ -123,6 +126,9 @@ def _parse_rooms(text: str) -> int | None:
     # Common explicit patterns first
     for pattern in (
         _RE_ROOMS_SLASH_LAYOUT,
+        _RE_ROOMS_DASH_COMN,
+        _RE_ROOMS_KOMNATNAYA,
+        _RE_ROOMS_4X_COM,
         _RE_ROOMS_HONALI,
         _RE_ROOMS_XONALI,
         _RE_ROOMS_HONA,
@@ -186,9 +192,19 @@ def _parse_district_label(text: str) -> str | None:
 def _map_tashkent_district_label_to_slug(district_label: str | None) -> str | None:
     if not district_label:
         return None
-    norm = _normalize_space(district_label).lower()
-    for needle, slug in _TASHKENT_DISTRICT_SLUGS:
-        if needle.lower() in norm:
+    norm = _normalize_space(_clean_text_for_parsing(district_label)).casefold()
+    for slug, needles in _TASHKENT_DISTRICT_SLUGS:
+        if any(needle.casefold() in norm for needle in needles):
+            return slug
+    return None
+
+
+def _detect_tashkent_district_slug(text: str | None) -> str | None:
+    if not text:
+        return None
+    norm = _normalize_space(_clean_text_for_parsing(text)).casefold()
+    for slug, needles in _TASHKENT_DISTRICT_SLUGS:
+        if any(needle.casefold() in norm for needle in needles):
             return slug
     return None
 
@@ -229,7 +245,9 @@ def _extract_ads_from_dom_text(
         rooms = _parse_rooms(rooms_source)
         area = _parse_area(area_source)
         district = _parse_district_label(cleaned_full_text)
-        district_slug = _map_tashkent_district_label_to_slug(district)
+        district_slug = _map_tashkent_district_label_to_slug(district) or _detect_tashkent_district_slug(
+            f"{title} {cleaned_full_text}"
+        )
         # If we can map district label -> slug, overwrite `city` with district slug.
         # This is crucial when worker fetches from `/tashkent/` but we need per-district matching.
         parsed_city = district_slug or city

@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, Numeric, String, Text, func, text
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Numeric, String, Text, func, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -40,9 +40,17 @@ class Filter(Base):
     type: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
 
     region: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    city: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    cities: Mapped[list[str]] = mapped_column(
+        JSONB,
+        nullable=False,
+        server_default=text("'[]'::jsonb"),
+    )
 
-    rooms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    rooms: Mapped[list[int]] = mapped_column(
+        JSONB,
+        nullable=False,
+        server_default=text("'[]'::jsonb"),
+    )
 
     price_min: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     price_max: Mapped[int | None] = mapped_column(BigInteger, nullable=True)

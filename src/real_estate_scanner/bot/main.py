@@ -51,27 +51,22 @@ async def start_handler(message: Message) -> None:
 async def webapp_data_handler(message: Message) -> None:
     logger.info("webapp_data_handler: from_id=%s", message.from_user.id)
 
-    raw_data_str = message.web_app_data.data
-    logger.debug("webapp_data_handler: raw_web_app_data=%s", raw_data_str)
-
     try:
-        payload = json.loads(raw_data_str)
+        payload = json.loads(message.web_app_data.data)
         if not isinstance(payload, dict):
             raise ValueError("payload must be an object")
-        logger.info("webapp_data_handler: json parsed")
     except Exception:
         logger.exception("webapp_data_handler: cannot parse web_app_data json")
         await message.answer("Ошибка: неверный формат данных. Попробуйте ещё раз.")
         return
 
-    filter_payload: Any = payload.get("filter")
-    if filter_payload is None:
+    filter_data: Any = payload.get("filter")
+    if filter_data is None:
         await message.answer("Ошибка: отсутствует `filter` в данных.")
         return
 
     try:
-        filter_schema = FilterSchema.model_validate(filter_payload)
-        logger.info("webapp_data_handler: filter validated")
+        filter_schema = FilterSchema.model_validate(filter_data)
     except Exception:
         logger.exception("webapp_data_handler: filter validation failed")
         await message.answer("Ошибка: фильтр заполнен некорректно. Проверьте поля и повторите.")
@@ -80,7 +75,7 @@ async def webapp_data_handler(message: Message) -> None:
     # Save to DB
     try:
         user_id = message.from_user.id
-        logger.info("Сохраняю фильтр для юзера %s: тип=%s", user_id, filter_schema.type)
+        logger.info("ПОЛУЧЕН НОВЫЙ ФИЛЬТР: Тип=%s, Районы=%s", filter_schema.type, filter_schema.cities)
         async with AsyncSessionLocal() as session:
             await upsert_user(session=session, user_id=user_id, username=message.from_user.username)
 
@@ -101,7 +96,7 @@ async def webapp_data_handler(message: Message) -> None:
         await message.answer("Ошибка: не удалось сохранить фильтр. Попробуйте позже.")
         return
 
-    await message.answer("Фильтр принят! Я начал поиск новых объявлений.")
+    await message.answer(f"✅ Мониторинг запущен! Ищу: {filter_schema.type}")
 
 
 async def main() -> None:

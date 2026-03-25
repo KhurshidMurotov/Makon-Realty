@@ -75,13 +75,8 @@
             </div>
 
             <div>
-              <label for="citySelect" class="block text-xs text-slate-400">Город / Район</label>
-              <select
-                id="citySelect"
-                class="mt-2 w-full rounded-xl bg-slate-950 px-3 py-2 text-slate-100 outline-none ring-1 ring-slate-800 focus:ring-2 focus:ring-sky-500/60"
-              >
-                <option value="yunusabadskiy" selected>Юнусабадский</option>
-              </select>
+              <p class="block text-xs text-slate-400">Районы</p>
+              <div id="cityGrid" class="mt-2 grid grid-cols-2 gap-2"></div>
             </div>
           </div>
         </section>
@@ -273,27 +268,37 @@
       };
 
       const regionSelect = qs("regionSelect");
-      const citySelect = qs("citySelect");
+      const cityGrid = qs("cityGrid");
+      let selectedCities = [];
 
       function renderCitiesForRegion(regionSlug) {
         const cities = olxLocations[regionSlug] || [];
-        citySelect.innerHTML = "";
+        cityGrid.innerHTML = "";
+        selectedCities = [];
+        cities.forEach((c, idx) => {
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.dataset.city = c.value;
+          btn.className =
+            "rounded-xl border border-slate-800 bg-slate-950/60 px-3 py-2 text-sm font-medium text-slate-300 transition hover:border-slate-700";
+          btn.textContent = c.label;
+          btn.addEventListener("click", () => toggleCity(c.value, btn));
+          cityGrid.appendChild(btn);
+          if (idx === 0) {
+            toggleCity(c.value, btn);
+          }
+        });
+      }
 
-        if (!cities.length) {
-          const opt = document.createElement("option");
-          opt.value = "";
-          opt.textContent = "Выберите";
-          citySelect.appendChild(opt);
+      function toggleCity(cityValue, btn) {
+        const exists = selectedCities.includes(cityValue);
+        if (exists) {
+          selectedCities = selectedCities.filter((value) => value !== cityValue);
+          btn.classList.remove("active");
           return;
         }
-
-        cities.forEach((c, idx) => {
-          const opt = document.createElement("option");
-          opt.value = c.value;
-          opt.textContent = c.label;
-          if (idx === 0) opt.selected = true;
-          citySelect.appendChild(opt);
-        });
+        selectedCities = [...selectedCities, cityValue];
+        btn.classList.add("active");
       }
 
       regionSelect.addEventListener("change", () => {
@@ -323,26 +328,32 @@
 
       // Rooms buttons (single select)
       const roomBtns = Array.from(document.querySelectorAll(".roomBtn"));
-      let rooms = null;
+      let selectedRooms = [];
       const roomsValue = qs("roomsValue");
 
-      function selectRoom(newRooms) {
-        rooms = newRooms;
-        roomBtns.forEach((b) => b.classList.remove("active"));
-        const activeRoomBtn = roomBtns.find((b) => Number(b.dataset.rooms) === newRooms);
-        if (activeRoomBtn) {
-          activeRoomBtn.classList.add("active");
+      function toggleRoom(newRooms) {
+        const exists = selectedRooms.includes(newRooms);
+        if (exists) {
+          selectedRooms = selectedRooms.filter((value) => value !== newRooms);
+        } else {
+          selectedRooms = [...selectedRooms, newRooms].sort((a, b) => a - b);
         }
-        roomsValue.textContent = newRooms === null ? "—" : (newRooms === 5 ? "5+" : String(newRooms));
+        roomBtns.forEach((b) => {
+          const roomValue = Number(b.dataset.rooms);
+          b.classList.toggle("active", selectedRooms.includes(roomValue));
+        });
+        roomsValue.textContent = selectedRooms.length
+          ? selectedRooms.map((value) => (value === 5 ? "5+" : String(value))).join(", ")
+          : "—";
       }
 
       roomBtns.forEach((btn) => {
         btn.addEventListener("click", () => {
           const v = Number(btn.dataset.rooms);
-          selectRoom(v);
+          toggleRoom(v);
         });
       });
-      selectRoom(null);
+      roomsValue.textContent = "—";
 
       function buildAdditionalParams() {
         const floorMin = normalizeInt(qs("floorMin").value);
@@ -372,8 +383,8 @@
             name: name,
             type: adType,
             region: regionSelect.value || null,
-            city: citySelect.value || null,
-            rooms: rooms,
+            cities: selectedCities,
+            rooms: selectedRooms,
             area_min: areaMin,
             area_max: areaMax,
             price_min: priceMin,

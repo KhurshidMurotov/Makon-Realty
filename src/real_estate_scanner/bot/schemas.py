@@ -12,7 +12,7 @@ class FilterSchema(BaseModel):
 
     name: str | None = Field(default=None, max_length=200)
     type: str = Field(pattern=r"^(rent|sale)$")
-    rooms: int | None = Field(default=None, ge=1, le=5)
+    rooms: list[int] = Field(default_factory=list, min_length=0)
 
     price_min: int | None = Field(default=None, ge=0)
     price_max: int | None = Field(default=None, ge=0)
@@ -21,7 +21,7 @@ class FilterSchema(BaseModel):
     area_max: float | None = Field(default=None, ge=0)
 
     region: str = Field(min_length=1, max_length=128)
-    city: str = Field(min_length=1, max_length=128)
+    cities: list[str] = Field(default_factory=list, min_length=1)
 
     # Used for optional extra fields from frontend.
     additional_params: dict[str, Any] = Field(default_factory=dict)

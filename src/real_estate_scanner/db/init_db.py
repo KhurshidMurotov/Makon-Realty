@@ -16,4 +16,51 @@ async def init_db() -> None:
         await conn.execute(
             text("ALTER TABLE ads ADD COLUMN IF NOT EXISTS image_url TEXT")
         )
+        await conn.execute(
+            text("ALTER TABLE filters ADD COLUMN IF NOT EXISTS cities JSONB NOT NULL DEFAULT '[]'::jsonb")
+        )
+        await conn.execute(
+            text(
+                """
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_name = 'filters'
+                          AND column_name = 'rooms'
+                          AND data_type <> 'jsonb'
+                    ) THEN
+                        ALTER TABLE filters
+                        ALTER COLUMN rooms TYPE JSONB
+                        USING CASE
+                            WHEN rooms IS NULL THEN '[]'::jsonb
+                            ELSE to_jsonb(ARRAY[rooms])
+                        END;
+                    END IF;
+                END
+                $$;
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                UPDATE filters
+                SET cities = CASE
+                    WHEN city IS NULL OR city = '' THEN '[]'::jsonb
+                    ELSE to_jsonb(ARRAY[city])
+                END
+                WHERE cities = '[]'::jsonb
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                ALTER TABLE filters
+                ALTER COLUMN rooms SET DEFAULT '[]'::jsonb
+                """
+            )
+        )
 

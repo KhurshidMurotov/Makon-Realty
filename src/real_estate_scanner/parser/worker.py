@@ -19,23 +19,44 @@ from real_estate_scanner.parser.olx_client import ParsedAd, build_search_url, fe
 logger = logging.getLogger(__name__)
 
 
+def _display_city_name(city_slug: str | None) -> str:
+    mapping = {
+        "tashkent": "Ташкент",
+        "mirzoulugbek": "Мирзо-Улугбек",
+        "yashnabadskiy": "Яшнабад",
+        "yunusabadskiy": "Юнусабад",
+        "chilanzarskiy": "Чиланзар",
+        "yakkasarayskiy": "Яккасарай",
+    }
+    return mapping.get(city_slug or "", city_slug or "Ташкент")
+
+
 def _build_html_notification(ad: ParsedAd) -> str:
-    rooms_value = f"{ad.rooms} комнат" if ad.rooms is not None else "Комнат: не определено"
-    area_value = f"{ad.area:g} м2" if ad.area is not None else "—"
-    district = ad.district or ad.city or "—"
+    layout = f"{ad.rooms}-комн" if ad.rooms is not None else "Планировка не указана"
+    area_value = f"{ad.area:g}" if ad.area is not None else "—"
+    city_name = escape(_display_city_name(ad.city))
+    district_name = escape(ad.district or _display_city_name(ad.city) or "Район не указан")
+    price_usd = int(ad.price / settings.USD_TO_SUM_RATE) if settings.USD_TO_SUM_RATE > 0 else ad.price
+    price_per_m2 = round(price_usd / ad.area) if ad.area else 0
+    market_price = price_usd
+    description_short = escape((ad.title or "").strip() or "Описание не указано")
+    author = "Не указан"
+    created_at = "Не указано"
 
-    # Telegram HTML parse mode: keep text escaped, link as anchor.
-    safe_title = escape(ad.title or "")
-    safe_district = escape(district)
-    safe_link = escape(ad.link or "", quote=True)
-
-    return (
-        f"🏠 <b>{safe_title}</b>\n"
-        f"💰 Цена: <b>{ad.price}</b> сум\n"
-        f"📍 Район: {safe_district}\n"
-        f"📏 Площадь: {escape(area_value)}\n"
-        f"🛏 {escape(rooms_value)}\n\n"
-        f"<a href=\"{safe_link}\">Открыть на OLX</a>"
+    return "\n".join(
+        [
+            f"{escape(layout)}, {escape(area_value)} m²",
+            f"{city_name}, {district_name}",
+            f"${price_usd} ({price_per_m2} $/m²)",
+            f"Рыночная цена: ${market_price}",
+            "(анализ похожих объявлений)",
+            "",
+            description_short,
+            "",
+            f"От: {author}",
+            f"Создано: {created_at}",
+            "Источник: OLX.uz",
+        ]
     )
 
 
@@ -53,24 +74,22 @@ async def _get_users_by_price_city_only(
     price_max_ok = or_(Filter.price_max.is_(None), Filter.price_max >= ad_price)
     price_condition = and_(price_min_ok, price_max_ok)
 
-    stmt = (
-        select(User.id)
-        .join(Filter, Filter.user_id == User.id)
-        .where(
-            Filter.type == ad_type,
-            Filter.city == ad_city,
-            price_condition,
-        )
-    )
+    stmt = select(User.id, Filter).join(Filter, Filter.user_id == User.id).where(Filter.type == ad_type)
     res = await session.execute(stmt)
-    return list(res.scalars().all())
+    matched_user_ids: list[int] = []
+    for user_id, flt in res.all():
+        filter_cities = list(flt.cities or [])
+        city_ok = not filter_cities or ad_city in filter_cities
+        if city_ok and (flt.price_min is None or flt.price_min <= ad_price) and (flt.price_max is None or flt.price_max >= ad_price):
+            matched_user_ids.append(user_id)
+    return matched_user_ids
 
 
 def _build_inline_link(ad: ParsedAd) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="Открыть на OLX", url=ad.link),
+                InlineKeyboardButton(text="↗ Перейти к объявлению", url=ad.link),
             ]
         ]
     )
@@ -80,17 +99,22 @@ async def _get_distinct_filter_targets_v2(session: AsyncSession) -> list[tuple[s
     """
     Возвращает уникальные тройки (type, region, city_district) для парсинга.
     """
-    stmt = select(Filter.type, Filter.region, Filter.city).where(
+    stmt = select(Filter.type, Filter.region, Filter.cities).where(
         Filter.type.is_not(None),
         Filter.region.is_not(None),
-        Filter.city.is_not(None),
+        Filter.cities.is_not(None),
     ).distinct()
     res = await session.execute(stmt)
     rows = res.all()
     out: list[tuple[str, str, str]] = []
-    for ad_type, region, city in rows:
-        if ad_type and region and city:
-            out.append((ad_type, region, city))
+    seen: set[tuple[str, str, str]] = set()
+    for ad_type, region, cities in rows:
+        for city in cities or []:
+            if ad_type and region and city:
+                item = (ad_type, region, city)
+                if item not in seen:
+                    seen.add(item)
+                    out.append(item)
     return out
 
 
@@ -104,6 +128,21 @@ async def _notify_users_for_ad(*, bot: Bot, session: AsyncSession, ad: ParsedAd)
         ad.price,
         ad.district or ad.city,
     )
+
+    if ad.city == "tashkent":
+        mismatch_stmt = (
+            select(Filter.cities)
+            .where(
+                Filter.type == ad.ad_type,
+                Filter.cities.is_not(None),
+            )
+            .distinct()
+        )
+        mismatch_res = await session.execute(mismatch_stmt)
+        for wanted_cities in mismatch_res.scalars().all():
+            for wanted_city in wanted_cities or []:
+                if wanted_city != "tashkent":
+                    logger.info("District mismatch: user wants %s, ad is %s", wanted_city, ad.city)
 
     user_ids: list[int] = []
 
@@ -266,16 +305,15 @@ async def run_worker(bot: Bot, *, interval_seconds: int = 600) -> None:
                 logger.info("Worker: targets=%s", targets)
 
                 for ad_type, region_slug, district_city_slug in targets:
-                    # For OLX URL building (especially for Tashkent region),
-                    # use the *city* path (tashkent) not the district slug (yashnabadskiy).
                     if region_slug == "tashkent":
-                        url_city_slug = "tashkent"
                         fetch_city_fallback = "tashkent"
+                        if ad_type == "rent":
+                            url = f"{settings.OLX_BASE_URL}/nedvizhimost/kvartiry/arenda-dolgosrochnaya/tashkent/"
+                        else:
+                            url = f"{settings.OLX_BASE_URL}/nedvizhimost/kvartiry/prodazha/tashkent/"
                     else:
-                        url_city_slug = district_city_slug
                         fetch_city_fallback = district_city_slug
-
-                    url = build_search_url(ad_type=ad_type, city_slug=url_city_slug)
+                        url = build_search_url(ad_type=ad_type, city_slug=district_city_slug)
                     logger.info(
                         "Проверяю фильтр: type=%s region=%s city=%s -> url=%s",
                         ad_type,
@@ -283,13 +321,13 @@ async def run_worker(bot: Bot, *, interval_seconds: int = 600) -> None:
                         district_city_slug,
                         url,
                     )
-                    logger.info("Финальный URL для Playwright: %s", url)
+                    logger.info("ЗАПУСКАЮ ПОИСК ПО URL: %s", url)
 
                     ads = await fetch_ads_from_search(url=url, ad_type=ad_type, city=fetch_city_fallback)
                     logger.info(
-                        "Worker: fetched %s ads for url_city=%s (original district=%s)",
+                        "Worker: fetched %s ads for fetch_city=%s (original district=%s)",
                         len(ads),
-                        url_city_slug,
+                        fetch_city_fallback,
                         district_city_slug,
                     )
 

@@ -53,8 +53,8 @@ async def save_filter(session: AsyncSession, user_id: int, filter_data: dict[str
                 user_id=user_id,
                 type=filter_data.get("type"),
                 region=filter_data.get("region"),
-                city=filter_data.get("city"),
-                rooms=filter_data.get("rooms"),
+                cities=filter_data.get("cities") or [],
+                rooms=filter_data.get("rooms") or [],
                 price_min=filter_data.get("price_min"),
                 price_max=filter_data.get("price_max"),
                 area_min=filter_data.get("area_min"),
@@ -66,8 +66,8 @@ async def save_filter(session: AsyncSession, user_id: int, filter_data: dict[str
                 set_={
                     "type": filter_data.get("type"),
                     "region": filter_data.get("region"),
-                    "city": filter_data.get("city"),
-                    "rooms": filter_data.get("rooms"),
+                    "cities": filter_data.get("cities") or [],
+                    "rooms": filter_data.get("rooms") or [],
                     "price_min": filter_data.get("price_min"),
                     "price_max": filter_data.get("price_max"),
                     "area_min": filter_data.get("area_min"),
@@ -148,35 +148,27 @@ async def get_users_for_ad(
     try:
         # Numeric(12,2) в БД, поэтому удобно передавать Decimal.
         area = Decimal(str(ad_area))
-
-        rooms_condition = or_(
-            Filter.rooms.is_(None),
-            and_(Filter.rooms == 5, ad_rooms >= 5),
-            and_(Filter.rooms != 5, Filter.rooms == ad_rooms),
-        )
-
-        price_min_ok = or_(Filter.price_min.is_(None), Filter.price_min <= ad_price)
-        price_max_ok = or_(Filter.price_max.is_(None), Filter.price_max >= ad_price)
-        price_condition = and_(price_min_ok, price_max_ok)
-
-        area_min_ok = or_(Filter.area_min.is_(None), Filter.area_min <= area)
-        area_max_ok = or_(Filter.area_max.is_(None), Filter.area_max >= area)
-        area_condition = and_(area_min_ok, area_max_ok)
-
-        stmt = (
-            select(User.id)
-            .join(Filter, Filter.user_id == User.id)
-            .where(
-                Filter.type == ad_type,
-                Filter.city == ad_city,
-                rooms_condition,
-                price_condition,
-                area_condition,
-            )
-        )
-
+        stmt = select(User.id, Filter).join(Filter, Filter.user_id == User.id).where(Filter.type == ad_type)
         res = await session.execute(stmt)
-        return list(res.scalars().all())
+
+        matched_user_ids: list[int] = []
+        for user_id, flt in res.all():
+            filter_cities = list(flt.cities or [])
+            filter_rooms = list(flt.rooms or [])
+
+            city_ok = not filter_cities or ad_city in filter_cities
+            rooms_ok = not filter_rooms or ad_rooms in filter_rooms
+            price_ok = (flt.price_min is None or flt.price_min <= ad_price) and (
+                flt.price_max is None or flt.price_max >= ad_price
+            )
+            area_ok = (flt.area_min is None or flt.area_min <= area) and (
+                flt.area_max is None or flt.area_max >= area
+            )
+
+            if city_ok and rooms_ok and price_ok and area_ok:
+                matched_user_ids.append(user_id)
+
+        return matched_user_ids
     except Exception:
         logger.exception(
             "get_users_for_ad failed (price=%s rooms=%s area=%s type=%s city=%s)",
