@@ -32,9 +32,8 @@ def _display_city_name(city_slug: str | None) -> str:
 
 
 def _build_html_notification(ad: ParsedAd) -> str:
-    layout = f"{ad.rooms}-комн" if ad.rooms is not None else "Планировка не указана"
+    layout = f"{ad.rooms}-комн" if ad.rooms is not None else "—-комн"
     area_value = f"{ad.area:g}" if ad.area is not None else "—"
-    city_name = escape(_display_city_name(ad.city))
     district_name = escape(ad.district or _display_city_name(ad.city) or "Район не указан")
     price_usd = int(ad.price / settings.USD_TO_SUM_RATE) if settings.USD_TO_SUM_RATE > 0 else ad.price
     price_per_m2 = round(price_usd / ad.area) if ad.area else 0
@@ -46,10 +45,9 @@ def _build_html_notification(ad: ParsedAd) -> str:
     return "\n".join(
         [
             f"{escape(layout)}, {escape(area_value)} m²",
-            f"{city_name}, {district_name}",
+            f"Ташкент, {district_name}",
             f"${price_usd} ({price_per_m2} $/m²)",
             f"Рыночная цена: ${market_price}",
-            "(анализ похожих объявлений)",
             "",
             description_short,
             "",

@@ -8,11 +8,10 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
       .active {
-        background-color: #38bdf8 !important;
-        color: white !important;
-        border: 2px solid white !important;
-        box-shadow: 0 0 15px rgba(56, 189, 248, 0.5);
-        transform: scale(1.05);
+        background: #38bdf8 !important;
+        color: white;
+        border: 2px solid #fff;
+        box-shadow: 0 0 10px #38bdf8;
       }
     </style>
   </head>
@@ -284,9 +283,6 @@
           btn.textContent = c.label;
           btn.addEventListener("click", () => toggleCity(c.value, btn));
           cityGrid.appendChild(btn);
-          if (idx === 0) {
-            toggleCity(c.value, btn);
-          }
         });
       }
 
@@ -326,7 +322,7 @@
       tabSale.addEventListener("click", () => selectType("sale"));
       selectType("rent");
 
-      // Rooms buttons (single select)
+      // Rooms buttons (multi select)
       const roomBtns = Array.from(document.querySelectorAll(".roomBtn"));
       let selectedRooms = [];
       const roomsValue = qs("roomsValue");
