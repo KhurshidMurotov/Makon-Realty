@@ -1,6 +1,7 @@
 <!doctype html>
 <html lang="ru">
   <head>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Создать фильтр</title>
@@ -255,14 +256,12 @@
       }
 
       // Telegram WebApp init
-      try {
-        const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
-        if (tg) {
-          tg.ready();
-          tg.expand();
-        }
-      } catch (e) {
-        // ignore for local testing
+      const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+      if (tg) {
+        tg.ready();
+        tg.expand();
+      } else {
+        console.log("Telegram WebApp не доступен");
       }
 
       // OLX slugs for region/city selectors
@@ -310,15 +309,15 @@
       const tabSale = qs("tabSale");
       let adType = "rent";
 
-      function setTabActive(btn, type) {
-        adType = type;
+      function setTabActive(btn) {
+        adType = btn.dataset.type || adType;
         [tabRent, tabSale].forEach((b) => b.classList.remove("active"));
         btn.classList.add("active");
       }
 
-      tabRent.addEventListener("click", () => setTabActive(tabRent, "rent"));
-      tabSale.addEventListener("click", () => setTabActive(tabSale, "sale"));
-      setTabActive(tabRent, "rent");
+      tabRent.addEventListener("click", () => setTabActive(tabRent));
+      tabSale.addEventListener("click", () => setTabActive(tabSale));
+      setTabActive(tabRent);
 
       // Rooms buttons (single select)
       const roomBtns = Array.from(document.querySelectorAll(".roomBtn"));
@@ -387,10 +386,10 @@
       saveBtn.addEventListener("click", () => {
         const payload = buildPayload();
         const dataStr = JSON.stringify(payload);
+        console.log("ОТПРАВКА:", dataStr);
 
-        const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
         if (!tg || typeof tg.sendData !== "function") {
-          alert("Telegram WebApp не доступен. Проверьте запуск через Mini App.");
+          console.log("Telegram WebApp не доступен: sendData недоступен");
           return;
         }
         tg.sendData(dataStr);

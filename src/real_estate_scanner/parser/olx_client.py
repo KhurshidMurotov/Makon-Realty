@@ -54,10 +54,15 @@ _RE_PRICE_ANY = re.compile(r"([\d\s\u00A0]+)")
 #
 _RE_ROOMS_HONA = re.compile(r"(?P<rooms>\d+)\s*(?:хона|xona)\b", re.IGNORECASE)
 _RE_ROOMS_HONALI = re.compile(r"(?P<rooms>\d+)\s*хонали\b", re.IGNORECASE)
+_RE_ROOMS_XONALI = re.compile(r"(?P<rooms>\d+)\s*xonali\b", re.IGNORECASE)
 _RE_ROOMS_COM = re.compile(r"(?P<rooms>\d+)\s*х\s*ком\b", re.IGNORECASE)
 _RE_ROOMS_COMN = re.compile(r"(?P<rooms>\d+)\s*(?:комн|комнат)\b", re.IGNORECASE)
 _RE_ROOMS_HDOTK = re.compile(r"(?P<rooms>\d+)\s*х\.?\s*к\.?", re.IGNORECASE)  # "х. к."
 _RE_ROOMS_COMN_SHORT = re.compile(r"(?P<rooms>\d+)\s*комн\b", re.IGNORECASE)
+_RE_ROOMS_4_3_5_HONALI = re.compile(
+    r"(?P<rooms>\d)\s*/\s*\d+\s*/\s*\d+\s*(?:хона|хонали|xonali)\b",
+    re.IGNORECASE,
+)
 
 _RE_ROOMS_ANY_DIGIT_BEFORE_COM = re.compile(
     r"(?P<rooms>\d+)\s*(?:х\.?\s*к\.?|комн|комнат)\b",
@@ -66,13 +71,27 @@ _RE_ROOMS_ANY_DIGIT_BEFORE_COM = re.compile(
 
 # Area patterns (strict: must include m2 / кв.м / м² tokens)
 _RE_AREA_UNITS = re.compile(
-    r"(?P<area>\d+(?:[.,]\d+)?)\s*(?:м2|м\^2|м2\.|м\u00b2|м\u00b2\.|кв\.?\s*м|кв\.?\s*м\.?)\b",
+    r"(?P<area>\d+(?:[.,]\d+)?)\s*(?:m2|m²|м2|м²|кв\.?\s*м)",
     re.IGNORECASE,
 )
 
 
 def _normalize_space(s: str) -> str:
     return re.sub(r"\s+", " ", s or "").strip()
+
+
+def _clean_text_for_parsing(text: str) -> str:
+    """
+    OLX иногда вставляет служебные символы (например, фигурные скобки),
+    которые мешают regex-поиску.
+    """
+    if not text:
+        return ""
+    # Remove braces and keep things regex-friendly.
+    cleaned = text.replace("{", " ").replace("}", " ")
+    # Normalize weird whitespace to plain spaces.
+    cleaned = cleaned.replace("\u00A0", " ").replace("\u202F", " ")
+    return cleaned
 
 
 def _parse_price(text: str) -> Optional[int]:
@@ -96,10 +115,13 @@ def _parse_price(text: str) -> Optional[int]:
 def _parse_rooms(text: str) -> int | None:
     if not text:
         return None
+    text = _clean_text_for_parsing(text)
 
     # Common explicit patterns first
     for pattern in (
+        _RE_ROOMS_4_3_5_HONALI,
         _RE_ROOMS_HONALI,
+        _RE_ROOMS_XONALI,
         _RE_ROOMS_HONA,
         _RE_ROOMS_HDOTK,
         _RE_ROOMS_ANY_DIGIT_BEFORE_COM,
@@ -126,6 +148,9 @@ def _parse_rooms(text: str) -> int | None:
 
 
 def _parse_area(text: str) -> float | None:
+    if not text:
+        return None
+    text = _clean_text_for_parsing(text)
     # 1) Preferred: with units.
     m = _RE_AREA_UNITS.search(text)
     if m:
@@ -194,13 +219,21 @@ def _extract_ads_from_dom_text(
         price = _parse_price(price_text or ad_text)
         if price is None:
             return None
-        rooms = _parse_rooms(rooms_text or ad_text)
-        area = _parse_area(area_text or ad_text)
-        district = _parse_district_label(ad_text)
+        cleaned_full_text = _clean_text_for_parsing(ad_text)
+        rooms_source = rooms_text or cleaned_full_text
+        area_source = area_text or cleaned_full_text
+
+        rooms = _parse_rooms(rooms_source)
+        area = _parse_area(area_source)
+        district = _parse_district_label(cleaned_full_text)
         district_slug = _map_tashkent_district_label_to_slug(district)
         # If we can map district label -> slug, overwrite `city` with district slug.
         # This is crucial when worker fetches from `/tashkent/` but we need per-district matching.
         parsed_city = district_slug or city
+
+        # Rooms fallback: try to parse rooms from title if not found in the card text.
+        if rooms is None:
+            rooms = _parse_rooms(title)
         link = href if href.startswith("http") else urljoin(base_url, href)
         resolved_image = image_url
         if resolved_image and not resolved_image.startswith("http"):
