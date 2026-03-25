@@ -109,6 +109,8 @@ async def add_ad(session: AsyncSession, ad_data: dict[str, Any]) -> None:
             "link": ad_data["link"],
             "title": ad_data["title"],
         }
+        if "image_url" in ad_data:
+            values["image_url"] = ad_data["image_url"]
         if "timestamp" in ad_data and ad_data["timestamp"] is not None:
             values["timestamp"] = ad_data["timestamp"]
 

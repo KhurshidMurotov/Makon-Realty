@@ -68,6 +68,7 @@ class Ad(Base):
     price: Mapped[int] = mapped_column(BigInteger, nullable=False)
     link: Mapped[str] = mapped_column(Text, nullable=False)
     title: Mapped[str] = mapped_column(Text, nullable=False)
+    image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     timestamp: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

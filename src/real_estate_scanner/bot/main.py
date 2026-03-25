@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+# Allow running bot from project root without PYTHONPATH
+sys.path.append(str(Path(__file__).resolve().parents[2]))
+
 import asyncio
 import json
 import logging
@@ -16,6 +22,7 @@ from real_estate_scanner.config import settings
 from real_estate_scanner.db.crud import save_filter, upsert_user
 from real_estate_scanner.db.init_db import init_db
 from real_estate_scanner.db.session import AsyncSessionLocal
+from real_estate_scanner.parser.worker import run_worker
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +134,16 @@ async def main() -> None:
     dp = Dispatcher()
     dp.include_router(router)
 
-    await dp.start_polling(bot)
+    worker_task = asyncio.create_task(run_worker(bot))
+    try:
+        await dp.start_polling(bot)
+    finally:
+        worker_task.cancel()
+        try:
+            await worker_task
+        except Exception:
+            # Ignore cancellation errors on shutdown.
+            pass
 
 
 if __name__ == "__main__":

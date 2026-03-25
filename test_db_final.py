@@ -1,9 +1,5 @@
-import asyncio
 import sys
 from pathlib import Path
-
-if sys.platform == "win32":
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 sys.path.append(str(Path(__file__).resolve().parent / "src"))
 

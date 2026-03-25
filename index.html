@@ -5,6 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Создать фильтр</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      /* Visual feedback for selected buttons */
+      .active {
+        border-color: rgb(56 189 248) !important;
+        background-color: rgba(56, 189, 248, 0.12) !important;
+        color: rgb(248 250 252) !important;
+      }
+    </style>
   </head>
   <body class="min-h-screen bg-slate-950 text-slate-100">
     <div class="mx-auto max-w-lg px-4 pb-28 pt-6">
@@ -304,17 +312,8 @@
 
       function setTabActive(btn, type) {
         adType = type;
-        const activeClass =
-          "border-sky-500/70 bg-sky-500/10 text-slate-50 hover:border-sky-500/70";
-        const inactiveClass =
-          "border-slate-800 bg-slate-950/60 text-slate-300 hover:border-slate-700";
-
-        [tabRent, tabSale].forEach((b) => {
-          b.classList.remove(activeClass);
-          b.classList.add(inactiveClass);
-        });
-        btn.classList.remove(inactiveClass);
-        btn.classList.add(activeClass);
+        [tabRent, tabSale].forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
       }
 
       tabRent.addEventListener("click", () => setTabActive(tabRent, "rent"));
@@ -330,13 +329,7 @@
         rooms = newRooms;
         roomBtns.forEach((b) => {
           const isActive = Number(b.dataset.rooms) === newRooms;
-          if (isActive) {
-            b.classList.add("border-sky-500/70", "bg-sky-500/10", "text-slate-50");
-            b.classList.remove("border-slate-800", "bg-slate-950/60", "text-slate-300");
-          } else {
-            b.classList.add("border-slate-800", "bg-slate-950/60", "text-slate-300");
-            b.classList.remove("border-sky-500/70", "bg-sky-500/10", "text-slate-50");
-          }
+          b.classList.toggle("active", isActive);
         });
         roomsValue.textContent = newRooms === null ? "—" : (newRooms === 5 ? "5+" : String(newRooms));
       }
