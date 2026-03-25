@@ -8,8 +8,11 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
       .active {
-        border: 2px solid #38bdf8;
-        background: rgba(56, 189, 248, 0.1);
+        background-color: #38bdf8 !important;
+        color: white !important;
+        border: 2px solid white !important;
+        box-shadow: 0 0 15px rgba(56, 189, 248, 0.5);
+        transform: scale(1.05);
       }
     </style>
   </head>
@@ -254,11 +257,9 @@
       }
 
       // Telegram WebApp init
-      const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
-      if (tg) {
-        tg.ready();
-        tg.expand();
-      }
+      const tg = window.Telegram.WebApp;
+      tg.ready();
+      tg.expand();
 
       // OLX slugs for region/city selectors
       const olxLocations = {
@@ -305,37 +306,43 @@
       const tabSale = qs("tabSale");
       let adType = "rent";
 
-      function setTabActive(btn) {
-        adType = btn.dataset.type || adType;
+      function selectType(type) {
         [tabRent, tabSale].forEach((b) => b.classList.remove("active"));
-        btn.classList.add("active");
+        if (type === "sale") {
+          tabSale.classList.add("active");
+          adType = "sale";
+          return;
+        }
+        tabRent.classList.add("active");
+        adType = "rent";
       }
 
-      tabRent.addEventListener("click", () => setTabActive(tabRent));
-      tabSale.addEventListener("click", () => setTabActive(tabSale));
-      setTabActive(tabRent);
+      tabRent.addEventListener("click", () => selectType("rent"));
+      tabSale.addEventListener("click", () => selectType("sale"));
+      selectType("rent");
 
       // Rooms buttons (single select)
       const roomBtns = Array.from(document.querySelectorAll(".roomBtn"));
       let rooms = null;
       const roomsValue = qs("roomsValue");
 
-      function setRooms(newRooms) {
+      function selectRoom(newRooms) {
         rooms = newRooms;
-        roomBtns.forEach((b) => {
-          const isActive = Number(b.dataset.rooms) === newRooms;
-          b.classList.toggle("active", isActive);
-        });
+        roomBtns.forEach((b) => b.classList.remove("active"));
+        const activeRoomBtn = roomBtns.find((b) => Number(b.dataset.rooms) === newRooms);
+        if (activeRoomBtn) {
+          activeRoomBtn.classList.add("active");
+        }
         roomsValue.textContent = newRooms === null ? "—" : (newRooms === 5 ? "5+" : String(newRooms));
       }
 
       roomBtns.forEach((btn) => {
         btn.addEventListener("click", () => {
           const v = Number(btn.dataset.rooms);
-          setRooms(v);
+          selectRoom(v);
         });
       });
-      setRooms(null);
+      selectRoom(null);
 
       function buildAdditionalParams() {
         const floorMin = normalizeInt(qs("floorMin").value);
