@@ -6,13 +6,13 @@ from html import escape
 
 from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from real_estate_scanner.config import settings
 from real_estate_scanner.db.crud import add_ad, get_users_for_ad, is_new_ad
 from real_estate_scanner.db.init_db import init_db
-from real_estate_scanner.db.models import Filter
+from real_estate_scanner.db.models import Filter, User
 from real_estate_scanner.db.session import AsyncSessionLocal
 from real_estate_scanner.parser.olx_client import ParsedAd, build_search_url, fetch_ads_from_search
 
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 def _build_html_notification(ad: ParsedAd) -> str:
-    rooms = f"{ad.rooms} комнат" if ad.rooms is not None else "Комнаты: —"
+    rooms_value = f"{ad.rooms} комнат" if ad.rooms is not None else "Комнат: не определено"
     area_value = f"{ad.area:g} м2" if ad.area is not None else "—"
     district = ad.district or ad.city or "—"
 
@@ -34,9 +34,36 @@ def _build_html_notification(ad: ParsedAd) -> str:
         f"💰 Цена: <b>{ad.price}</b> сум\n"
         f"📍 Район: {safe_district}\n"
         f"📏 Площадь: {escape(area_value)}\n"
-        f"🛏 {escape(rooms)}\n\n"
+        f"🛏 {escape(rooms_value)}\n\n"
         f"<a href=\"{safe_link}\">Открыть на OLX</a>"
     )
+
+
+async def _get_users_by_price_city_only(
+    session: AsyncSession,
+    *,
+    ad_price: int,
+    ad_type: str,
+    ad_city: str,
+) -> list[int]:
+    """
+    Матчинг без rooms/area: type + city(район) + price диапазон.
+    """
+    price_min_ok = or_(Filter.price_min.is_(None), Filter.price_min <= ad_price)
+    price_max_ok = or_(Filter.price_max.is_(None), Filter.price_max >= ad_price)
+    price_condition = and_(price_min_ok, price_max_ok)
+
+    stmt = (
+        select(User.id)
+        .join(Filter, Filter.user_id == User.id)
+        .where(
+            Filter.type == ad_type,
+            Filter.city == ad_city,
+            price_condition,
+        )
+    )
+    res = await session.execute(stmt)
+    return list(res.scalars().all())
 
 
 def _build_inline_link(ad: ParsedAd) -> InlineKeyboardMarkup:
@@ -78,14 +105,74 @@ async def _notify_users_for_ad(*, bot: Bot, session: AsyncSession, ad: ParsedAd)
         ad.district or ad.city,
     )
 
-    if ad.rooms is None or ad.area is None:
+    user_ids: list[int] = []
+
+    # Full match requires rooms+area.
+    if ad.rooms is not None and ad.area is not None:
+        user_ids = await get_users_for_ad(
+            session=session,
+            ad_price=ad.price,
+            ad_rooms=ad.rooms,
+            ad_area=ad.area,
+            ad_type=ad.ad_type,
+            ad_city=ad.city,
+        )
+
+        # If nothing matched, try currency conversion (sum -> usd) for full match too.
+        if not user_ids and settings.USD_TO_SUM_RATE > 0:
+            converted_price = int(ad.price / settings.USD_TO_SUM_RATE)
+            logger.info(
+                "Матчинг не найден. Пробую конвертацию: %s сум -> %s USD (rate=%s)",
+                ad.price,
+                converted_price,
+                settings.USD_TO_SUM_RATE,
+            )
+            user_ids = await get_users_for_ad(
+                session=session,
+                ad_price=converted_price,
+                ad_rooms=ad.rooms,
+                ad_area=ad.area,
+                ad_type=ad.ad_type,
+                ad_city=ad.city,
+            )
+            if user_ids:
+                logger.info("Матчинг успешен после конвертации цены.")
+
+    # Fallback: if rooms is missing, try matching by price + district only.
+    elif ad.rooms is None and ad.area is not None:
+        logger.info("Fallback matching (rooms missing): olx_id=%s", ad.olx_id)
+        user_ids = await _get_users_by_price_city_only(
+            session=session,
+            ad_price=ad.price,
+            ad_type=ad.ad_type,
+            ad_city=ad.city,
+        )
+
+        if not user_ids and settings.USD_TO_SUM_RATE > 0:
+            converted_price = int(ad.price / settings.USD_TO_SUM_RATE)
+            logger.info(
+                "Fallback: матчинг не найден. Конвертирую цену: %s сум -> %s USD (rate=%s)",
+                ad.price,
+                converted_price,
+                settings.USD_TO_SUM_RATE,
+            )
+            user_ids = await _get_users_by_price_city_only(
+                session=session,
+                ad_price=converted_price,
+                ad_type=ad.ad_type,
+                ad_city=ad.city,
+            )
+            if user_ids:
+                logger.info("Fallback: матчинг успешен после конвертации цены.")
+
+    else:
+        # Can't match if area missing.
         logger.info(
             "Не могу матчить olx_id=%s: rooms=%s area=%s",
             ad.olx_id,
             ad.rooms,
             ad.area,
         )
-        # Persist the ad to avoid re-processing, but can't match without rooms/area.
         await add_ad(
             session,
             {
@@ -98,36 +185,6 @@ async def _notify_users_for_ad(*, bot: Bot, session: AsyncSession, ad: ParsedAd)
             },
         )
         return
-
-    # 1) Try matching by raw OLX price (usually UZS)
-    user_ids = await get_users_for_ad(
-        session=session,
-        ad_price=ad.price,
-        ad_rooms=ad.rooms,
-        ad_area=ad.area,
-        ad_type=ad.ad_type,
-        ad_city=ad.city,
-    )
-
-    # 2) If nothing matched, try a simple currency conversion (sum -> usd)
-    if not user_ids and settings.USD_TO_SUM_RATE > 0:
-        converted_price = int(ad.price / settings.USD_TO_SUM_RATE)
-        logger.info(
-            "Матчинг не найден по цене в суммах. Пробую конвертацию: %s сум -> %s USD (rate=%s)",
-            ad.price,
-            converted_price,
-            settings.USD_TO_SUM_RATE,
-        )
-        user_ids = await get_users_for_ad(
-            session=session,
-            ad_price=converted_price,
-            ad_rooms=ad.rooms,
-            ad_area=ad.area,
-            ad_type=ad.ad_type,
-            ad_city=ad.city,
-        )
-        if user_ids:
-            logger.info("Матчинг успешен после конвертации цены.")
 
     if not user_ids:
         logger.info(

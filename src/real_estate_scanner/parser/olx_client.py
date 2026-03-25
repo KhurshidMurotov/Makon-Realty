@@ -44,16 +44,29 @@ _TASHKENT_DISTRICT_SLUGS: list[tuple[str, str]] = [
 _RE_PRICE_WITH_SUM = re.compile(r"([\d\s\u00A0]+)\s*сум\b", re.IGNORECASE)
 _RE_PRICE_ANY = re.compile(r"([\d\s\u00A0]+)")
 
-# Title patterns:
-# - "Продажа 4 хона ..." / "Продается 4х ком квартира ..."
-# - Latin: "3xona kvartira ..."
+# Rooms patterns (OLX uses many localized variants)
+#
+# Examples we want to support:
+# - "3 хона" / "4 хона"
+# - "3 хонали"
+# - "4 х. к." / "4 х к." / "4 х.ком." (abbrev)
+# - "2 комн" / "2 комнат"
+#
 _RE_ROOMS_HONA = re.compile(r"(?P<rooms>\d+)\s*(?:хона|xona)\b", re.IGNORECASE)
+_RE_ROOMS_HONALI = re.compile(r"(?P<rooms>\d+)\s*хонали\b", re.IGNORECASE)
 _RE_ROOMS_COM = re.compile(r"(?P<rooms>\d+)\s*х\s*ком\b", re.IGNORECASE)
 _RE_ROOMS_COMN = re.compile(r"(?P<rooms>\d+)\s*(?:комн|комнат)\b", re.IGNORECASE)
+_RE_ROOMS_HDOTK = re.compile(r"(?P<rooms>\d+)\s*х\.?\s*к\.?", re.IGNORECASE)  # "х. к."
+_RE_ROOMS_COMN_SHORT = re.compile(r"(?P<rooms>\d+)\s*комн\b", re.IGNORECASE)
 
-# area sometimes appears with units ("м2"), sometimes as a plain number (heuristic)
+_RE_ROOMS_ANY_DIGIT_BEFORE_COM = re.compile(
+    r"(?P<rooms>\d+)\s*(?:х\.?\s*к\.?|комн|комнат)\b",
+    re.IGNORECASE,
+)
+
+# Area patterns (strict: must include m2 / кв.м / м² tokens)
 _RE_AREA_UNITS = re.compile(
-    r"(?P<area>[\d]+(?:[.,][\d]+)?)\s*(?:м2|м\^2|кв\.?\s*м|м2\.|м\u00b2|м2\b|м\b)",
+    r"(?P<area>\d+(?:[.,]\d+)?)\s*(?:м2|м\^2|м2\.|м\u00b2|м\u00b2\.|кв\.?\s*м|кв\.?\s*м\.?)\b",
     re.IGNORECASE,
 )
 
@@ -81,15 +94,34 @@ def _parse_price(text: str) -> Optional[int]:
 
 
 def _parse_rooms(text: str) -> int | None:
-    # Special "5+" may appear in filters, but for cards we try direct room count patterns.
-    for pattern in (_RE_ROOMS_HONA, _RE_ROOMS_COM, _RE_ROOMS_COMN):
+    if not text:
+        return None
+
+    # Common explicit patterns first
+    for pattern in (
+        _RE_ROOMS_HONALI,
+        _RE_ROOMS_HONA,
+        _RE_ROOMS_HDOTK,
+        _RE_ROOMS_ANY_DIGIT_BEFORE_COM,
+        _RE_ROOMS_COMN,
+        _RE_ROOMS_COM,
+        _RE_ROOMS_COMN_SHORT,
+    ):
         m = pattern.search(text)
-        if m:
-            try:
-                v = int(m.group("rooms"))
-                return v if 1 <= v <= 10 else None
-            except Exception:
-                return None
+        if not m:
+            continue
+        try:
+            v = int(m.group("rooms"))
+        except Exception:
+            return None
+        # Room counts on OLX are usually 1..10; ignore weird matches.
+        if 1 <= v <= 10:
+            return v
+
+    # Fallback: if card contains "5+" as "5+" and doesn't match above, try that too.
+    if re.search(r"\b5\+\b", text):
+        return 5
+
     return None
 
 
@@ -99,26 +131,16 @@ def _parse_area(text: str) -> float | None:
     if m:
         raw = m.group("area").replace(",", ".")
         try:
-            return float(raw)
+            area = float(raw)
+            if area < 20 or area > 500:
+                logger.warning("OLX: area out of bounds parsed=%s raw=%r", area, raw)
+                return None
+            return area
         except ValueError:
             return None
 
-    # 2) Fallback: last "reasonable" number (OLX often shows m² as plain integer).
-    #    In listing blocks it usually comes after location/date, so last <= 300 token works best.
-    nums = re.findall(r"\b\d[\d\s\u00A0]*\b", text or "")
-    parsed: list[int] = []
-    for n in nums:
-        cleaned = n.replace("\u00A0", " ").replace(" ", "")
-        try:
-            v = int(cleaned)
-        except ValueError:
-            continue
-        if 10 <= v <= 300:
-            parsed.append(v)
-    if not parsed:
-        return None
-    # choose last candidate
-    return float(parsed[-1])
+    # 2) No fallback here: strict unit-based parsing avoids mixing floors/other numbers.
+    return None
 
 
 def _parse_district_label(text: str) -> str | None:
@@ -164,14 +186,16 @@ def _extract_ads_from_dom_text(
     base_url: str,
     price_text: str | None = None,
     image_url: str | None = None,
+    rooms_text: str | None = None,
+    area_text: str | None = None,
 ) -> ParsedAd | None:
     try:
         title = _normalize_space(title_fallback or ad_text[:80])
         price = _parse_price(price_text or ad_text)
         if price is None:
             return None
-        rooms = _parse_rooms(ad_text)
-        area = _parse_area(ad_text)
+        rooms = _parse_rooms(rooms_text or ad_text)
+        area = _parse_area(area_text or ad_text)
         district = _parse_district_label(ad_text)
         district_slug = _map_tashkent_district_label_to_slug(district)
         # If we can map district label -> slug, overwrite `city` with district slug.
@@ -182,6 +206,14 @@ def _extract_ads_from_dom_text(
         if resolved_image and not resolved_image.startswith("http"):
             resolved_image = urljoin(base_url, resolved_image)
         olx_id = _parse_olx_id_from_href(link)
+
+        # Debug logging for parsing failures.
+        sample = _normalize_space(ad_text)[:100]
+        if rooms is None:
+            logger.warning("OLX parse: rooms not found. text[:100]=%r", sample)
+        if area is None:
+            logger.warning("OLX parse: area not found. text[:100]=%r", sample)
+
         return ParsedAd(
             olx_id=olx_id,
             title=title,
@@ -207,9 +239,9 @@ async def _auto_scroll(page: Page, steps: int = 4, delay_ms: int = 600) -> None:
 
 async def _collect_candidate_ads(
     page: Page,
-) -> list[tuple[str, str, str, str, str | None]]:
+) -> list[tuple[str, str, str, str, str | None, str | None, str | None]]:
     """
-    Возвращает кортежи (href, title, price_text, card_text, image_url).
+    Возвращает кортежи (href, title, price_text, card_text, rooms_text, area_text, image_url).
 
     Селекторы зависят от разметки OLX, поэтому используем общий подход:
     берём все ссылки, ведущие на объявления (`/d/obyavlenie/...`),
@@ -217,7 +249,7 @@ async def _collect_candidate_ads(
     """
     async def _extract_with_selector(
         selector: str,
-    ) -> list[tuple[str, str, str, str, str | None]]:
+    ) -> list[tuple[str, str, str, str, str | None, str | None, str | None]]:
         candidates = await page.eval_on_selector_all(
             selector,
         """
@@ -240,20 +272,44 @@ async def _collect_candidate_ads(
             const title = (titleNode?.innerText || titleNode?.textContent || '').trim();
             const priceText = priceNode ? (priceNode.innerText || priceNode.textContent || '').trim() : null;
             const text = (card && card.innerText ? card.innerText : (el.innerText || el.textContent || '')).trim();
+            const roomsNode =
+              card?.querySelector('[data-testid*="rooms"]') ||
+              card?.querySelector('[data-testid*="комн"]') ||
+              card?.querySelector('[data-testid*="комнат"]') ||
+              null;
+            const areaNode =
+              card?.querySelector('[data-testid*="m2"]') ||
+              card?.querySelector('[data-testid*="area"]') ||
+              card?.querySelector('[data-testid*="м2"]') ||
+              null;
+
+            const roomsText = roomsNode ? (roomsNode.innerText || roomsNode.textContent || '').trim() : null;
+            const areaText = areaNode ? (areaNode.innerText || areaNode.textContent || '').trim() : null;
+
             const img = (card && card.querySelector('img')) || el.querySelector('img');
             const imageUrl = img
               ? (img.currentSrc || img.src || img.getAttribute('src') || img.getAttribute('data-src') || null)
               : null;
 
-            return { href, title, priceText, text, imageUrl };
+            return { href, title, priceText, text, roomsText, areaText, imageUrl };
           })
           .filter(x => x.href)
         """,
         )
 
-        result: list[tuple[str, str, str, str, str | None]] = []
+        result: list[tuple[str, str, str, str, str | None, str | None, str | None]] = []
         for c in candidates:
-            result.append((c["href"], c["title"], c["priceText"] or "", c["text"], c["imageUrl"]))
+            result.append(
+                (
+                    c["href"],
+                    c["title"],
+                    c["priceText"] or "",
+                    c["text"],
+                    c["roomsText"],
+                    c["areaText"],
+                    c["imageUrl"],
+                )
+            )
         return result
 
     # 1) Plan A: use known grid/card markers if present.
@@ -327,7 +383,7 @@ async def fetch_ads_from_search(
                     logger.warning("OLX: candidates==0, failed to save screenshot")
 
             count = 0
-            for href, title, price_text, text, image_url in candidates:
+            for href, title, price_text, text, rooms_text, area_text, image_url in candidates:
                 if count >= limit:
                     break
 
@@ -340,6 +396,8 @@ async def fetch_ads_from_search(
                     base_url=base_url,
                     price_text=price_text or None,
                     image_url=image_url,
+                    rooms_text=rooms_text,
+                    area_text=area_text,
                 )
                 if parsed is not None:
                     ads.append(parsed)
