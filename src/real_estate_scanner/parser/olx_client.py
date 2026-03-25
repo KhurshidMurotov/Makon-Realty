@@ -37,11 +37,193 @@ class ParsedAd:
 
 
 _TASHKENT_DISTRICT_SLUGS: list[tuple[str, tuple[str, ...]]] = [
-    ("yashnabadskiy", ("Яшнабад", "Яшнабод")),
-    ("yunusabadskiy", ("Юнусабад",)),
-    ("mirzoulugbek", ("Мирзо-Улугбек", "Мирзо Улугбек", "М.Улугбек", "М-Улугбек", "Мирзо")),
-    ("chilanzarskiy", ("Чиланзар",)),
-    ("yakkasarayskiy", ("Яккасарай",)),
+    (
+        "mirzoulugbek",
+        (
+            "Mirzo Ulug'bek",
+            "Mirzo Ulugbek",
+            "Мирзо Улуғбек",
+            "Мирзо Улугбек",
+            "ТТЗ",
+            "TTZ",
+            "Максим Горький",
+            "M Gorkiy",
+            "M.Gorkiy",
+            "БИЙ",
+            "BIY",
+            "Буюк Ипак Йули",
+            "Buyuk Ipak Yoli",
+            "Buyuk Ipak Yo'li",
+            "Феруза",
+            "Feruza",
+            "Паркентский",
+            "Parkentskiy",
+            "Аккурган",
+            "Okkurgan",
+            "Новомосковская",
+            "Novomoskovskaya",
+            "Карасу",
+            "Qorasuv",
+            "Ц 1",
+            "C 1",
+            "Ц 2",
+            "C 2",
+        ),
+    ),
+    (
+        "yashnabadskiy",
+        (
+            "Yashnobod",
+            "Яшнобод",
+            "Яшнабод",
+            "Дустлик",
+            "Do'stlik",
+            "Dostlik",
+            "Авиасозлар",
+            "Aviasozlar",
+            "Кадышева",
+            "Kadysheva",
+            "Рохат",
+            "Rohat",
+            "Лисунова",
+            "Lisunova",
+            "Ташсельмаш",
+            "Tashselmash",
+            "40 лет Победы",
+            "40 let",
+            "Панельный",
+            "Panelniy",
+        ),
+    ),
+    (
+        "yakkasarayskiy",
+        (
+            "Yakkasaroy",
+            "Яккасарой",
+            "ЦУМ",
+            "TSUM",
+            "Космонавтов",
+            "Kosmonavtlar",
+            "Шота Руставели",
+            "Shota Rustaveli",
+            "Бабура",
+            "Bobur",
+            "Аския",
+            "Askiya",
+            "Ракат",
+            "Rakat",
+            "Кушбеги",
+            "Kushbegi",
+            "Башлык",
+            "Bashliq",
+        ),
+    ),
+    (
+        "chilanzarskiy",
+        (
+            "Chilonzor",
+            "Чилонзор",
+            "Чиланзор",
+            "Фархадский",
+            "Farhod",
+            "Актепа",
+            "Oqtepa",
+            "Катартал",
+            "Qatortol",
+            "Альгоритм",
+            "Algoritm",
+            "Домрабад",
+            "Domrobod",
+            "Шухрат",
+            "Shuhrat",
+        ),
+    ),
+    (
+        "yunusabadskiy",
+        (
+            "Yunusobod",
+            "Юнусобод",
+            "Шахристан",
+            "Shahriston",
+            "Мегапланет",
+            "Megaplanet",
+            "Туркистон",
+            "Turkiston",
+            "Зенит",
+            "Zenit",
+            "Бодомзор",
+            "Bodomzor",
+            "Юнусобод",
+            "Юнус Абад",
+            "Юнус-Абад",
+        ),
+    ),
+    (
+        "mirabadskiy",
+        (
+            "Mirobod",
+            "Миробод",
+            "Госпитальный",
+            "Gospitalniy",
+            "Ойбек",
+            "Oybek",
+            "Мирабад",
+            "Mirabod",
+            "Первушка",
+            "Pervushka",
+            "Саракулька",
+            "Sarakulka",
+            "Мирабад Авеню",
+            "Mirabad Avenue",
+        ),
+    ),
+    (
+        "almazarskiy",
+        (
+            "Olmazor",
+            "Олмазор",
+            "Себзор",
+            "Sebzor",
+            "Каракамыш",
+            "Qoraqamish",
+            "Тансыкбаева",
+            "Tansiqboyev",
+            "Ганга",
+            "Ganga",
+            "Беруни",
+            "Beruniy",
+            "Чорсу",
+            "Chorsu",
+        ),
+    ),
+    (
+        "uchtepinskiy",
+        (
+            "Uchtepa",
+            "Учтепа",
+            "Бешкайрагач",
+            "Beshqayragoch",
+            "Beshqayrag'och",
+            "Чиланзар 2",
+            "Chilonzor 2",
+        ),
+    ),
+    (
+        "sergeli",
+        (
+            "Sergeli",
+            "Сергели",
+            "Спутник",
+            "Sputnik",
+            "Янгихаёт",
+            "Yangihayot",
+            "Чоштепа",
+            "Choshtepa",
+            "Куйлюк",
+            "Qoyliq",
+            "Qo'yliq",
+        ),
+    ),
 ]
 
 
@@ -60,12 +242,13 @@ _RE_ROOMS_HONA = re.compile(r"(?P<rooms>\d+)\s*(?:хона|xona)\b", re.IGNORECA
 _RE_ROOMS_HONALI = re.compile(r"(?P<rooms>\d+)\s*хонали\b", re.IGNORECASE)
 _RE_ROOMS_XONALI = re.compile(r"(?P<rooms>\d+)\s*xonali\b", re.IGNORECASE)
 _RE_ROOMS_DASH_COMN = re.compile(r"(?P<rooms>\d+)\s*-\s*комн\b", re.IGNORECASE)
+_RE_ROOMS_DASH_X_COMN = re.compile(r"(?P<rooms>\d+)\s*-\s*[хx]\s*комн\b", re.IGNORECASE)
 _RE_ROOMS_KOMNATNAYA = re.compile(r"(?P<rooms>\d+)\s*-\s*комнатн(?:ая|ую|ой)\b", re.IGNORECASE)
 _RE_ROOMS_4X_COM = re.compile(r"(?P<rooms>\d+)\s*[хx]\s*ком\b", re.IGNORECASE)
 _RE_ROOMS_COM = re.compile(r"(?P<rooms>\d+)\s*х\s*ком\b", re.IGNORECASE)
 _RE_ROOMS_COMN = re.compile(r"(?P<rooms>\d+)\s*(?:комн|комнат)\b", re.IGNORECASE)
 _RE_ROOMS_HDOTK = re.compile(r"(?P<rooms>\d+)\s*х\.?\s*к\.?", re.IGNORECASE)  # "х. к."
-_RE_ROOMS_COMN_SHORT = re.compile(r"(?P<rooms>\d+)\s*комн\b", re.IGNORECASE)
+_RE_ROOMS_COMN_SHORT = re.compile(r"(?P<rooms>\d+)\s*ком(?:н)?\b", re.IGNORECASE)
 _RE_ROOMS_SLASH_LAYOUT = re.compile(
     r"(?P<rooms>\d+)\s*/\s*\d+\s*/\s*\d+(?:\s*(?:хона|хонали|xona|xonali))?\b",
     re.IGNORECASE,
@@ -77,10 +260,8 @@ _RE_ROOMS_ANY_DIGIT_BEFORE_COM = re.compile(
 )
 
 # Area patterns (strict: must include m2 / кв.м / м² tokens)
-_RE_AREA_UNITS = re.compile(
-    r"(?P<area>\d+(?:[.,]\d+)?)\s*(?:m2|м2|м²|кв\.?\s*м)",
-    re.IGNORECASE,
-)
+_RE_AREA_UNITS = re.compile(r"(?P<area>\d+(?:[.,]\d+)?)\s*sqm", re.IGNORECASE)
+_RE_AREA_WORDY = re.compile(r"(?P<area>\d+(?:[.,]\d+)?)\s*квад\w*", re.IGNORECASE)
 
 
 def _normalize_space(s: str) -> str:
@@ -94,7 +275,15 @@ def _clean_text_for_parsing(text: str) -> str:
     """
     if not text:
         return ""
-    cleaned = text.replace("m²", "m2").replace("м²", "m2")
+    cleaned = (
+        text.replace("m²", " sqm ")
+        .replace("м²", " sqm ")
+        .replace("м2", " sqm ")
+        .replace("m2", " sqm ")
+        .replace("кв.м", " sqm ")
+        .replace("кв м", " sqm ")
+        .replace("кв. м", " sqm ")
+    )
     # Remove service punctuation and brackets that often break regex parsing.
     cleaned = re.sub(r"[{}\[\]()]", " ", cleaned)
     cleaned = re.sub(r"[|]+", " ", cleaned)
@@ -131,6 +320,7 @@ def _parse_rooms(text: str) -> int | None:
     # Common explicit patterns first
     for pattern in (
         _RE_ROOMS_SLASH_LAYOUT,
+        _RE_ROOMS_DASH_X_COMN,
         _RE_ROOMS_DASH_COMN,
         _RE_ROOMS_KOMNATNAYA,
         _RE_ROOMS_4X_COM,
@@ -167,6 +357,8 @@ def _parse_area(text: str) -> float | None:
     text = _clean_text_for_parsing(text)
     # 1) Preferred: with units.
     m = _RE_AREA_UNITS.search(text)
+    if not m:
+        m = _RE_AREA_WORDY.search(text)
     if m:
         raw = m.group("area").replace(",", ".")
         try:
@@ -199,7 +391,7 @@ def _map_tashkent_district_label_to_slug(district_label: str | None) -> str | No
         return None
     norm = _normalize_space(_clean_text_for_parsing(district_label)).casefold()
     for slug, needles in _TASHKENT_DISTRICT_SLUGS:
-        if any(needle.casefold() in norm for needle in needles):
+        if any(_normalize_space(_clean_text_for_parsing(needle)).casefold() in norm for needle in needles):
             return slug
     return None
 
@@ -209,7 +401,7 @@ def _detect_tashkent_district_slug(text: str | None) -> str | None:
         return None
     norm = _normalize_space(_clean_text_for_parsing(text)).casefold()
     for slug, needles in _TASHKENT_DISTRICT_SLUGS:
-        if any(needle.casefold() in norm for needle in needles):
+        if any(_normalize_space(_clean_text_for_parsing(needle)).casefold() in norm for needle in needles):
             return slug
     return None
 

@@ -27,6 +27,10 @@ def _display_city_name(city_slug: str | None) -> str:
         "yunusabadskiy": "Юнусабад",
         "chilanzarskiy": "Чиланзар",
         "yakkasarayskiy": "Яккасарай",
+        "mirabadskiy": "Мирабад",
+        "almazarskiy": "Алмазар",
+        "uchtepinskiy": "Учтепа",
+        "sergeli": "Сергели",
     }
     return mapping.get(city_slug or "", city_slug or "Ташкент")
 
@@ -146,8 +150,7 @@ async def _notify_users_for_ad(*, bot: Bot, session: AsyncSession, ad: ParsedAd)
 
     user_ids: list[int] = []
 
-    # Full match requires rooms+area.
-    if ad.rooms is not None and ad.area is not None:
+    if ad.rooms is not None:
         user_ids = await get_users_for_ad(
             session=session,
             ad_price=ad.price,
@@ -177,8 +180,7 @@ async def _notify_users_for_ad(*, bot: Bot, session: AsyncSession, ad: ParsedAd)
             if user_ids:
                 logger.info("Матчинг успешен после конвертации цены.")
 
-    # Fallback: if rooms is missing, try matching by price + district only.
-    elif ad.rooms is None and ad.area is not None:
+    elif ad.rooms is None:
         logger.info("Fallback matching (rooms missing): olx_id=%s", ad.olx_id)
         user_ids = await _get_users_by_price_city_only(
             session=session,
@@ -203,27 +205,6 @@ async def _notify_users_for_ad(*, bot: Bot, session: AsyncSession, ad: ParsedAd)
             )
             if user_ids:
                 logger.info("Fallback: матчинг успешен после конвертации цены.")
-
-    else:
-        # Can't match if area missing.
-        logger.info(
-            "Не могу матчить olx_id=%s: rooms=%s area=%s",
-            ad.olx_id,
-            ad.rooms,
-            ad.area,
-        )
-        await add_ad(
-            session,
-            {
-                "olx_id": ad.olx_id,
-                "price": ad.price,
-                "link": ad.link,
-                "title": ad.title,
-                "image_url": ad.image_url,
-                "timestamp": None,
-            },
-        )
-        return
 
     if not user_ids:
         logger.info(

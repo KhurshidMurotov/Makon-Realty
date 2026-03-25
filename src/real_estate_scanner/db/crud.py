@@ -126,7 +126,7 @@ async def get_users_for_ad(
     session: AsyncSession,
     ad_price: int,
     ad_rooms: int,
-    ad_area: float,
+    ad_area: float | None,
     ad_type: str,
     ad_city: str,
 ) -> list[int]:
@@ -137,7 +137,7 @@ async def get_users_for_ad(
     """
     try:
         # Numeric(12,2) в БД, поэтому удобно передавать Decimal.
-        area = Decimal(str(ad_area))
+        area = Decimal(str(ad_area)) if ad_area is not None else None
         stmt = select(User.id, Filter).join(Filter, Filter.user_id == User.id).where(Filter.type == ad_type)
         res = await session.execute(stmt)
 
@@ -151,9 +151,11 @@ async def get_users_for_ad(
             price_ok = (flt.price_min is None or flt.price_min <= ad_price) and (
                 flt.price_max is None or flt.price_max >= ad_price
             )
-            area_ok = (flt.area_min is None or flt.area_min <= area) and (
-                flt.area_max is None or flt.area_max >= area
-            )
+            area_ok = True
+            if area is not None:
+                area_ok = (flt.area_min is None or flt.area_min <= area) and (
+                    flt.area_max is None or flt.area_max >= area
+                )
 
             if city_ok and rooms_ok and price_ok and area_ok:
                 matched_user_ids.append(user_id)

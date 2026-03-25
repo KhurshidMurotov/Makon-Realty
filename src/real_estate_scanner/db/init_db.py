@@ -28,6 +28,30 @@ async def init_db() -> None:
                         SELECT 1
                         FROM information_schema.columns
                         WHERE table_name = 'filters'
+                          AND column_name = 'cities'
+                          AND data_type <> 'jsonb'
+                    ) THEN
+                        ALTER TABLE filters
+                        ALTER COLUMN cities TYPE JSONB
+                        USING CASE
+                            WHEN cities IS NULL THEN '[]'::jsonb
+                            ELSE to_jsonb(cities)
+                        END;
+                    END IF;
+                END
+                $$;
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_name = 'filters'
                           AND column_name = 'rooms'
                           AND data_type <> 'jsonb'
                     ) THEN
@@ -52,6 +76,14 @@ async def init_db() -> None:
                     ELSE to_jsonb(ARRAY[city])
                 END
                 WHERE cities = '[]'::jsonb
+                """
+            )
+        )
+        await conn.execute(
+            text(
+                """
+                ALTER TABLE filters
+                ALTER COLUMN cities SET DEFAULT '[]'::jsonb
                 """
             )
         )
