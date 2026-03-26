@@ -37,9 +37,11 @@ class ParsedAd:
 
 
 _TASHKENT_DISTRICT_SLUGS: list[tuple[str, tuple[str, ...]]] = [
-    (
-        "mirzoulugbek",
         (
+            "mirzoulugbek",
+            (
+            "Мирзо-Улугбекский",
+            "Мирзо Улугбекский",
             "Mirzo Ulug'bek",
             "Mirzo Ulugbek",
             "Мирзо Улуғбек",
@@ -70,9 +72,10 @@ _TASHKENT_DISTRICT_SLUGS: list[tuple[str, tuple[str, ...]]] = [
             "C 2",
         ),
     ),
-    (
-        "yashnabadskiy",
         (
+            "yashnabadskiy",
+            (
+            "Яшнабадский",
             "Yashnobod",
             "Яшнобод",
             "Яшнабод",
@@ -95,9 +98,10 @@ _TASHKENT_DISTRICT_SLUGS: list[tuple[str, tuple[str, ...]]] = [
             "Panelniy",
         ),
     ),
-    (
-        "yakkasarayskiy",
         (
+            "yakkasarayskiy",
+            (
+            "Яккасарайский",
             "Yakkasaroy",
             "Яккасарой",
             "ЦУМ",
@@ -118,9 +122,10 @@ _TASHKENT_DISTRICT_SLUGS: list[tuple[str, tuple[str, ...]]] = [
             "Bashliq",
         ),
     ),
-    (
-        "chilanzarskiy",
         (
+            "chilanzarskiy",
+            (
+            "Чиланзарский",
             "Chilonzor",
             "Чилонзор",
             "Чиланзор",
@@ -138,9 +143,10 @@ _TASHKENT_DISTRICT_SLUGS: list[tuple[str, tuple[str, ...]]] = [
             "Shuhrat",
         ),
     ),
-    (
-        "yunusabadskiy",
         (
+            "yunusabadskiy",
+            (
+            "Юнусабадский",
             "Yunusobod",
             "Юнусобод",
             "Шахристан",
@@ -158,9 +164,10 @@ _TASHKENT_DISTRICT_SLUGS: list[tuple[str, tuple[str, ...]]] = [
             "Юнус-Абад",
         ),
     ),
-    (
-        "mirabadskiy",
         (
+            "mirabadskiy",
+            (
+            "Мирабадский",
             "Mirobod",
             "Миробод",
             "Госпитальный",
@@ -177,9 +184,10 @@ _TASHKENT_DISTRICT_SLUGS: list[tuple[str, tuple[str, ...]]] = [
             "Mirabad Avenue",
         ),
     ),
-    (
-        "almazarskiy",
         (
+            "almazarskiy",
+            (
+            "Алмазарский",
             "Olmazor",
             "Олмазор",
             "Себзор",
@@ -196,9 +204,10 @@ _TASHKENT_DISTRICT_SLUGS: list[tuple[str, tuple[str, ...]]] = [
             "Chorsu",
         ),
     ),
-    (
-        "uchtepinskiy",
         (
+            "uchtepinskiy",
+            (
+            "Учтепинский",
             "Uchtepa",
             "Учтепа",
             "Бешкайрагач",
@@ -208,9 +217,10 @@ _TASHKENT_DISTRICT_SLUGS: list[tuple[str, tuple[str, ...]]] = [
             "Chilonzor 2",
         ),
     ),
-    (
-        "sergeli",
         (
+            "sergeli",
+            (
+            "Сергелийский",
             "Sergeli",
             "Сергели",
             "Спутник",
@@ -244,6 +254,10 @@ _RE_ROOMS_XONALI = re.compile(r"(?P<rooms>\d+)\s*xonali\b", re.IGNORECASE)
 _RE_ROOMS_DASH_COMN = re.compile(r"(?P<rooms>\d+)\s*-\s*комн\b", re.IGNORECASE)
 _RE_ROOMS_DASH_X_COMN = re.compile(r"(?P<rooms>\d+)\s*-\s*[хx]\s*комн\b", re.IGNORECASE)
 _RE_ROOMS_KOMNATNAYA = re.compile(r"(?P<rooms>\d+)\s*-\s*комнатн(?:ая|ую|ой)\b", re.IGNORECASE)
+_RE_ROOMS_KOMNATNAYA_NO_DASH = re.compile(r"(?P<rooms>\d+)\s*комнатн(?:ая|ую|ой)\b", re.IGNORECASE)
+_RE_ROOMS_COM_YA = re.compile(r"(?P<rooms>\d+)\s*ком-?я\b", re.IGNORECASE)
+_RE_ROOMS_COM_WITH_PUNCT = re.compile(r"(?P<rooms>\d+)\s*[,.]?\s*комн?\b", re.IGNORECASE)
+_RE_ROOMS_XCOM_YA = re.compile(r"(?P<rooms>\d+)\s*[хx]\s*ком-?я\b", re.IGNORECASE)
 _RE_ROOMS_4X_COM = re.compile(r"(?P<rooms>\d+)\s*[хx]\s*ком\b", re.IGNORECASE)
 _RE_ROOMS_COM = re.compile(r"(?P<rooms>\d+)\s*х\s*ком\b", re.IGNORECASE)
 _RE_ROOMS_COMN = re.compile(r"(?P<rooms>\d+)\s*(?:комн|комнат)\b", re.IGNORECASE)
@@ -260,8 +274,10 @@ _RE_ROOMS_ANY_DIGIT_BEFORE_COM = re.compile(
 )
 
 # Area patterns (strict: must include m2 / кв.м / м² tokens)
-_RE_AREA_UNITS = re.compile(r"(?P<area>\d+(?:[.,]\d+)?)\s*sqm", re.IGNORECASE)
+_RE_AREA_UNITS = re.compile(r"(?P<area>\d+(?:[.,]\d+)?)\s*sqm\b", re.IGNORECASE)
 _RE_AREA_WORDY = re.compile(r"(?P<area>\d+(?:[.,]\d+)?)\s*квад\w*", re.IGNORECASE)
+_RE_AREA_LAT_WORDY = re.compile(r"(?P<area>\d+(?:[.,]\d+)?)\s*(?:kv|kvm|kvmetr|kv metr)\b", re.IGNORECASE)
+_RE_AREA_INLINE = re.compile(r"(?P<area>\d+(?:[.,]\d+)?)\s*(?:sq\s*m|square\s*meters?)", re.IGNORECASE)
 
 
 def _normalize_space(s: str) -> str:
@@ -280,9 +296,17 @@ def _clean_text_for_parsing(text: str) -> str:
         .replace("м²", " sqm ")
         .replace("м2", " sqm ")
         .replace("m2", " sqm ")
+        .replace("m 2", " sqm ")
+        .replace("м 2", " sqm ")
         .replace("кв.м", " sqm ")
         .replace("кв м", " sqm ")
         .replace("кв. м", " sqm ")
+        .replace("кв/м", " sqm ")
+        .replace("квм", " sqm ")
+        .replace("квметр", " sqm ")
+        .replace("квадратных", " sqm ")
+        .replace("квадратный", " sqm ")
+        .replace("квадтраных", " sqm ")
     )
     # Remove service punctuation and brackets that often break regex parsing.
     cleaned = re.sub(r"[{}\[\]()]", " ", cleaned)
@@ -323,6 +347,10 @@ def _parse_rooms(text: str) -> int | None:
         _RE_ROOMS_DASH_X_COMN,
         _RE_ROOMS_DASH_COMN,
         _RE_ROOMS_KOMNATNAYA,
+        _RE_ROOMS_KOMNATNAYA_NO_DASH,
+        _RE_ROOMS_XCOM_YA,
+        _RE_ROOMS_COM_YA,
+        _RE_ROOMS_COM_WITH_PUNCT,
         _RE_ROOMS_4X_COM,
         _RE_ROOMS_HONALI,
         _RE_ROOMS_XONALI,
@@ -359,6 +387,10 @@ def _parse_area(text: str) -> float | None:
     m = _RE_AREA_UNITS.search(text)
     if not m:
         m = _RE_AREA_WORDY.search(text)
+    if not m:
+        m = _RE_AREA_LAT_WORDY.search(text)
+    if not m:
+        m = _RE_AREA_INLINE.search(text)
     if m:
         raw = m.group("area").replace(",", ".")
         try:
@@ -711,11 +743,15 @@ async def fetch_ad_details(url: str) -> dict[str, str | int | None]:
     headless = headless_env in {"1", "true", "yes", "y", "on"}
 
     details: dict[str, str | int | None] = {
+        "rooms": None,
         "floor": None,
         "total_floors": None,
+        "area": None,
         "description": None,
         "author_name": None,
         "created_at_text": None,
+        "district_slug": None,
+        "district_label": None,
     }
 
     try:
@@ -732,6 +768,7 @@ async def fetch_ad_details(url: str) -> dict[str, str | int | None]:
             await page.wait_for_timeout(1200)
 
             page_text = await page.locator("body").inner_text()
+            parsed_rooms = _parse_rooms(page_text)
             description = None
             for selector in (
                 '[data-cy="ad_description"]',
@@ -774,14 +811,21 @@ async def fetch_ad_details(url: str) -> dict[str, str | int | None]:
                 created_at_text = _normalize_space(created_match.group(1))
 
             floor, total_floors = _extract_floor_info(page_text)
+            area = _parse_area(page_text)
+            district_label = _parse_district_label(page_text)
+            district_slug = _map_tashkent_district_label_to_slug(district_label) or _detect_tashkent_district_slug(page_text)
 
             details.update(
                 {
+                    "rooms": parsed_rooms,
                     "floor": floor,
                     "total_floors": total_floors,
+                    "area": area,
                     "description": description,
                     "author_name": author_name,
                     "created_at_text": created_at_text,
+                    "district_slug": district_slug,
+                    "district_label": district_label,
                 }
             )
             await browser.close()
@@ -793,8 +837,16 @@ async def fetch_ad_details(url: str) -> dict[str, str | int | None]:
 
 async def enrich_ad_with_details(ad: ParsedAd) -> ParsedAd:
     details = await fetch_ad_details(ad.link)
+    district_slug = details.get("district_slug")
+    district_label = details.get("district_label")
+    rooms = details.get("rooms")
+    area = details.get("area")
     return replace(
         ad,
+        city=district_slug if isinstance(district_slug, str) and district_slug else ad.city,
+        district=district_label if isinstance(district_label, str) and district_label else ad.district,
+        rooms=rooms if isinstance(rooms, int) and ad.rooms is None else ad.rooms,
+        area=area if isinstance(area, (int, float)) and ad.area is None else ad.area,
         floor=details.get("floor"),
         total_floors=details.get("total_floors"),
         description=details.get("description"),

@@ -180,6 +180,15 @@ async def _notify_users_for_ad(*, bot: Bot, session: AsyncSession, ad: ParsedAd)
             if user_ids:
                 logger.info("Матчинг успешен после конвертации цены.")
 
+        if not user_ids:
+            logger.info("Fallback matching (rooms mismatch or missing in filter path): olx_id=%s", ad.olx_id)
+            user_ids = await _get_users_by_price_city_only(
+                session=session,
+                ad_price=ad.price,
+                ad_type=ad.ad_type,
+                ad_city=ad.city,
+            )
+
     elif ad.rooms is None:
         logger.info("Fallback matching (rooms missing): olx_id=%s", ad.olx_id)
         user_ids = await _get_users_by_price_city_only(
