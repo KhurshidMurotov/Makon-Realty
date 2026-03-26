@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
+from dataclasses import asdict
+from datetime import datetime, timedelta
 from html import escape
+from zoneinfo import ZoneInfo
 
 from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
@@ -10,13 +14,23 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from real_estate_scanner.config import settings
-from real_estate_scanner.db.crud import add_ad, get_users_for_ad, is_new_ad
+from real_estate_scanner.db.crud import (
+    add_ad,
+    get_sale_broadcast_state,
+    get_users_for_ad,
+    is_new_ad,
+    list_active_sale_broadcast_states,
+    upsert_sale_broadcast_state,
+)
 from real_estate_scanner.db.init_db import init_db
-from real_estate_scanner.db.models import Filter, User
+from real_estate_scanner.db.models import Filter, SaleBroadcastState, User
 from real_estate_scanner.db.session import AsyncSessionLocal
 from real_estate_scanner.parser.olx_client import ParsedAd, build_search_url, enrich_ad_with_details, fetch_ads_from_search
 
 logger = logging.getLogger(__name__)
+_LOCAL_TZ = ZoneInfo("Asia/Tashkent")
+SALE_BROADCAST_BUTTON = "Все квартиры Ташкент | Продажа"
+STOP_BUTTON = "Стоп"
 
 
 def _display_city_name(city_slug: str | None) -> str:
@@ -95,6 +109,130 @@ def _build_inline_link(ad: ParsedAd) -> InlineKeyboardMarkup:
             ]
         ]
     )
+
+
+def _serialize_parsed_ad(ad: ParsedAd) -> dict:
+    payload = asdict(ad)
+    payload["published_at"] = ad.published_at.isoformat() if ad.published_at else None
+    return payload
+
+
+def _deserialize_parsed_ad(payload: dict) -> ParsedAd:
+    published_at = payload.get("published_at")
+    if isinstance(published_at, str):
+        try:
+            payload = dict(payload)
+            payload["published_at"] = datetime.fromisoformat(published_at)
+        except ValueError:
+            payload = dict(payload)
+            payload["published_at"] = None
+    return ParsedAd(**payload)
+
+
+async def build_sale_broadcast_snapshot(*, limit: int = 120) -> list[ParsedAd]:
+    url = build_search_url(ad_type="sale", city_slug="tashkent")
+    ads = await fetch_ads_from_search(url=url, ad_type="sale", city="tashkent", limit=limit)
+    enriched: list[ParsedAd] = []
+    for ad in ads:
+        detailed_ad = await enrich_ad_with_details(ad)
+        enriched.append(detailed_ad)
+        await asyncio.sleep(1.0)
+    return enriched
+
+
+def filter_ads_for_window(ads: list[ParsedAd], *, window_start: datetime, window_end: datetime) -> list[ParsedAd]:
+    result: list[ParsedAd] = []
+    seen: set[str] = set()
+    for ad in ads:
+        if ad.olx_id in seen:
+            continue
+        seen.add(ad.olx_id)
+        if ad.ad_type != "sale":
+            continue
+        published_at = ad.published_at
+        if published_at is None:
+            continue
+        if window_start <= published_at <= window_end:
+            result.append(ad)
+    result.sort(key=lambda item: item.published_at or window_start, reverse=True)
+    return result
+
+
+async def send_sale_broadcast_batch(*, bot: Bot, session: AsyncSession, state: SaleBroadcastState, force: bool = False) -> int:
+    if not state.is_active:
+        return 0
+
+    now = datetime.now(_LOCAL_TZ)
+    if not force and state.last_batch_at and (now - state.last_batch_at) < timedelta(seconds=300):
+        return 0
+
+    pending_ads = [_deserialize_parsed_ad(item) for item in list(state.pending_ads or [])]
+    if not pending_ads:
+        await upsert_sale_broadcast_state(
+            session,
+            user_id=state.user_id,
+            is_active=False,
+            started_at=state.started_at,
+            window_start=state.window_start,
+            window_end=state.window_end,
+            last_batch_at=now,
+            total_found=state.total_found,
+            pending_ads=[],
+            sent_olx_ids=list(state.sent_olx_ids or []),
+        )
+        return 0
+
+    batch_size = max(1, math.ceil(len(pending_ads) * 0.15))
+    batch = pending_ads[:batch_size]
+    rest = pending_ads[batch_size:]
+    sent_olx_ids = list(state.sent_olx_ids or [])
+
+    for ad in batch:
+        markup = _build_inline_link(ad)
+        text = _build_html_notification(ad)
+        try:
+            if ad.image_url:
+                try:
+                    await bot.send_photo(
+                        chat_id=state.user_id,
+                        photo=ad.image_url,
+                        caption=text,
+                        reply_markup=markup,
+                        parse_mode="HTML",
+                    )
+                except Exception:
+                    logger.exception("sale broadcast send_photo failed (user_id=%s, olx_id=%s)", state.user_id, ad.olx_id)
+                    await bot.send_message(
+                        chat_id=state.user_id,
+                        text=text,
+                        reply_markup=markup,
+                        parse_mode="HTML",
+                    )
+            else:
+                await bot.send_message(
+                    chat_id=state.user_id,
+                    text=text,
+                    reply_markup=markup,
+                    parse_mode="HTML",
+                )
+            sent_olx_ids.append(ad.olx_id)
+        except Exception:
+            logger.exception("sale broadcast send failed (user_id=%s, olx_id=%s)", state.user_id, ad.olx_id)
+        await asyncio.sleep(1.0)
+
+    await upsert_sale_broadcast_state(
+        session,
+        user_id=state.user_id,
+        is_active=bool(rest),
+        started_at=state.started_at,
+        window_start=state.window_start,
+        window_end=state.window_end,
+        last_batch_at=now,
+        total_found=state.total_found,
+        pending_ads=[_serialize_parsed_ad(ad) for ad in rest],
+        sent_olx_ids=sent_olx_ids,
+    )
+    return len(batch)
 
 
 async def _get_distinct_filter_targets_v2(session: AsyncSession) -> list[tuple[str, str, str]]:
@@ -291,6 +429,12 @@ async def run_worker(bot: Bot, *, interval_seconds: int = 200) -> None:
     while True:
         try:
             async with AsyncSessionLocal() as session:
+                sale_states = await list_active_sale_broadcast_states(session)
+                for state in sale_states:
+                    sent_count = await send_sale_broadcast_batch(bot=bot, session=session, state=state)
+                    if sent_count:
+                        logger.info("Sale broadcast batch sent: user_id=%s count=%s", state.user_id, sent_count)
+
                 targets = await _get_distinct_filter_targets_v2(session)
                 logger.info("Worker: targets=%s", targets)
 

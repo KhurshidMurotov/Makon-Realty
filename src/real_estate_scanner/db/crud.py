@@ -9,7 +9,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
 
-from real_estate_scanner.db.models import Ad, Filter, User
+from real_estate_scanner.db.models import Ad, Filter, SaleBroadcastState, User
 
 logger = logging.getLogger(__name__)
 
@@ -172,4 +172,60 @@ async def get_users_for_ad(
         )
         await session.rollback()
         raise
+
+
+async def get_sale_broadcast_state(session: AsyncSession, user_id: int) -> SaleBroadcastState | None:
+    stmt = select(SaleBroadcastState).where(SaleBroadcastState.user_id == user_id)
+    res = await session.execute(stmt)
+    return res.scalar_one_or_none()
+
+
+async def upsert_sale_broadcast_state(
+    session: AsyncSession,
+    *,
+    user_id: int,
+    is_active: bool,
+    started_at,
+    window_start,
+    window_end,
+    last_batch_at,
+    total_found: int,
+    pending_ads: list[dict[str, Any]],
+    sent_olx_ids: list[str],
+) -> None:
+    stmt = (
+        pg_insert(SaleBroadcastState)
+        .values(
+            user_id=user_id,
+            is_active=is_active,
+            started_at=started_at,
+            window_start=window_start,
+            window_end=window_end,
+            last_batch_at=last_batch_at,
+            total_found=total_found,
+            pending_ads=pending_ads,
+            sent_olx_ids=sent_olx_ids,
+        )
+        .on_conflict_do_update(
+            index_elements=[SaleBroadcastState.user_id],
+            set_={
+                "is_active": is_active,
+                "started_at": started_at,
+                "window_start": window_start,
+                "window_end": window_end,
+                "last_batch_at": last_batch_at,
+                "total_found": total_found,
+                "pending_ads": pending_ads,
+                "sent_olx_ids": sent_olx_ids,
+            },
+        )
+    )
+    await session.execute(stmt)
+    await session.commit()
+
+
+async def list_active_sale_broadcast_states(session: AsyncSession) -> list[SaleBroadcastState]:
+    stmt = select(SaleBroadcastState).where(SaleBroadcastState.is_active.is_(True))
+    res = await session.execute(stmt)
+    return list(res.scalars().all())
 

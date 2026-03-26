@@ -9,7 +9,10 @@ sys.path.append(str(Path(__file__).resolve().parents[2]))
 import asyncio
 import json
 import logging
+from dataclasses import asdict
+from datetime import datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import CommandStart
@@ -18,12 +21,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from real_estate_scanner.bot.schemas import FilterSchema
 from real_estate_scanner.config import settings
-from real_estate_scanner.db.crud import save_filter, upsert_user
+from real_estate_scanner.db.crud import get_sale_broadcast_state, save_filter, upsert_sale_broadcast_state, upsert_user
 from real_estate_scanner.db.init_db import init_db
 from real_estate_scanner.db.session import AsyncSessionLocal
-from real_estate_scanner.parser.worker import run_worker
+from real_estate_scanner.parser.worker import (
+    SALE_BROADCAST_BUTTON,
+    STOP_BUTTON,
+    build_sale_broadcast_snapshot,
+    filter_ads_for_window,
+    run_worker,
+    send_sale_broadcast_batch,
+)
 
 logger = logging.getLogger(__name__)
+_LOCAL_TZ = ZoneInfo("Asia/Tashkent")
+LEGACY_FILTER_BUTTON = "Подобрать недвижимость"
 
 router = Router()
 
@@ -38,13 +50,24 @@ async def start_handler(message: Message) -> None:
     logger.info("start_handler: from_id=%s username=%s", message.from_user.id, message.from_user.username)
 
     webapp_url = settings.MINI_APP_URL
+    async with AsyncSessionLocal() as session:
+        state = await get_sale_broadcast_state(session, message.from_user.id)
+    if state and state.is_active:
+        return
+
     keyboard = ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="Подобрать недвижимость", web_app=WebAppInfo(url=webapp_url))]],
+        keyboard=[
+            [KeyboardButton(text=LEGACY_FILTER_BUTTON, web_app=WebAppInfo(url=webapp_url))],
+            [KeyboardButton(text=SALE_BROADCAST_BUTTON), KeyboardButton(text=STOP_BUTTON)],
+        ],
         resize_keyboard=True,
         one_time_keyboard=False,
     )
 
-    await message.answer("Нажмите кнопку, чтобы создать фильтр и начать мониторинг OLX.", reply_markup=keyboard)
+    await message.answer(
+        "Выберите режим: старый фильтр или автоматическая отправка всех продаж квартир по Ташкенту за последние 7 суток.",
+        reply_markup=keyboard,
+    )
 
 
 @router.message(F.web_app_data)
@@ -97,6 +120,68 @@ async def webapp_data_handler(message: Message) -> None:
         return
 
     await message.answer(f"✅ Мониторинг запущен! Ищу: {filter_schema.type}")
+
+
+@router.message(F.text == SALE_BROADCAST_BUTTON)
+async def start_sale_broadcast_handler(message: Message) -> None:
+    user_id = message.from_user.id
+    bot = message.bot
+    async with AsyncSessionLocal() as session:
+        await upsert_user(session=session, user_id=user_id, username=message.from_user.username)
+        state = await get_sale_broadcast_state(session, user_id)
+        if state and state.is_active:
+            return
+
+    await message.answer("Собираю продажи квартир по Ташкенту за последние 7 суток. Это может занять немного времени.")
+    snapshot = await build_sale_broadcast_snapshot(limit=120)
+    window_end = datetime.now(_LOCAL_TZ)
+    window_start = window_end - timedelta(days=7)
+    filtered_ads = filter_ads_for_window(snapshot, window_start=window_start, window_end=window_end)
+
+    async with AsyncSessionLocal() as session:
+        await upsert_sale_broadcast_state(
+            session,
+            user_id=user_id,
+            is_active=bool(filtered_ads),
+            started_at=window_end,
+            window_start=window_start,
+            window_end=window_end,
+            last_batch_at=None,
+            total_found=len(filtered_ads),
+            pending_ads=[] if not filtered_ads else [asdict(ad) | {"published_at": ad.published_at.isoformat() if ad.published_at else None} for ad in filtered_ads],
+            sent_olx_ids=[],
+        )
+        available_count = len(filtered_ads)
+        await message.answer(f"Доступно квартир к отправке: {available_count}")
+        if filtered_ads:
+            state = await get_sale_broadcast_state(session, user_id)
+            if state:
+                sent_now = await send_sale_broadcast_batch(bot=bot, session=session, state=state, force=True)
+                if sent_now:
+                    await message.answer(f"Первая партия отправлена: {sent_now} объявлений.")
+
+
+@router.message(F.text == STOP_BUTTON)
+async def stop_sale_broadcast_handler(message: Message) -> None:
+    user_id = message.from_user.id
+    async with AsyncSessionLocal() as session:
+        state = await get_sale_broadcast_state(session, user_id)
+        if not state or not state.is_active:
+            await message.answer("Активной рассылки сейчас нет.")
+            return
+        await upsert_sale_broadcast_state(
+            session,
+            user_id=user_id,
+            is_active=False,
+            started_at=state.started_at,
+            window_start=state.window_start,
+            window_end=state.window_end,
+            last_batch_at=state.last_batch_at,
+            total_found=state.total_found,
+            pending_ads=[],
+            sent_olx_ids=list(state.sent_olx_ids or []),
+        )
+    await message.answer("Рассылка остановлена.")
 
 
 async def main() -> None:

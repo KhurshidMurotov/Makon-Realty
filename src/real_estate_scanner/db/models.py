@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Numeric, String, Text, func, text
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Numeric, String, Text, func, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -21,6 +21,11 @@ class User(Base):
     filters: Mapped[list["Filter"]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",
+    )
+    sale_broadcast_state: Mapped["SaleBroadcastState | None"] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        uselist=False,
     )
 
 
@@ -83,4 +88,40 @@ class Ad(Base):
         nullable=False,
         server_default=func.now(),
     )
+
+
+class SaleBroadcastState(Base):
+    __tablename__ = "sale_broadcast_states"
+
+    user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    is_active: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("false"),
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    window_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    window_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_batch_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    total_found: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        server_default=text("0"),
+    )
+    pending_ads: Mapped[list[dict]] = mapped_column(
+        JSONB,
+        nullable=False,
+        server_default=text("'[]'::jsonb"),
+    )
+    sent_olx_ids: Mapped[list[str]] = mapped_column(
+        JSONB,
+        nullable=False,
+        server_default=text("'[]'::jsonb"),
+    )
+
+    user: Mapped["User"] = relationship(back_populates="sale_broadcast_state")
 

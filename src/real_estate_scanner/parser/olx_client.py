@@ -5,9 +5,11 @@ import logging
 import os
 import re
 from dataclasses import dataclass, replace
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urljoin
+from zoneinfo import ZoneInfo
 
 from playwright.async_api import Browser, Page, async_playwright
 from playwright_stealth import Stealth
@@ -15,6 +17,21 @@ from playwright_stealth import Stealth
 from real_estate_scanner.config import settings
 
 logger = logging.getLogger(__name__)
+_LOCAL_TZ = ZoneInfo("Asia/Tashkent")
+_RU_MONTHS = {
+    "января": 1,
+    "февраля": 2,
+    "марта": 3,
+    "апреля": 4,
+    "мая": 5,
+    "июня": 6,
+    "июля": 7,
+    "августа": 8,
+    "сентября": 9,
+    "октября": 10,
+    "ноября": 11,
+    "декабря": 12,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +51,7 @@ class ParsedAd:
     description: str | None = None
     author_name: str | None = None
     created_at_text: str | None = None
+    published_at: datetime | None = None
 
 
 _TASHKENT_DISTRICT_SLUGS: list[tuple[str, tuple[str, ...]]] = [
@@ -473,6 +491,44 @@ def _extract_floor_info(text: str) -> tuple[int | None, int | None]:
     return None, None
 
 
+def _extract_created_at_from_text(text: str) -> tuple[str | None, datetime | None]:
+    if not text:
+        return None, None
+
+    normalized = _normalize_space(text)
+    now = datetime.now(_LOCAL_TZ)
+
+    rel_match = re.search(r"\b(Сегодня|Вчера)\s+в\s+(\d{1,2}):(\d{2})", normalized, re.IGNORECASE)
+    if rel_match:
+        day_word = rel_match.group(1).casefold()
+        hour = int(rel_match.group(2))
+        minute = int(rel_match.group(3))
+        base_date = now.date() if day_word == "сегодня" else (now - timedelta(days=1)).date()
+        created_at = datetime(base_date.year, base_date.month, base_date.day, hour, minute, tzinfo=_LOCAL_TZ)
+        return rel_match.group(0), created_at
+
+    abs_match = re.search(
+        r"\b(\d{1,2})\s+([А-Яа-я]+)\s*(\d{4})?\s*(?:г\.?)?(?:\s+в\s+(\d{1,2}):(\d{2}))?",
+        normalized,
+        re.IGNORECASE,
+    )
+    if abs_match:
+        day = int(abs_match.group(1))
+        month_name = abs_match.group(2).casefold()
+        month = _RU_MONTHS.get(month_name)
+        if month:
+            year = int(abs_match.group(3)) if abs_match.group(3) else now.year
+            hour = int(abs_match.group(4)) if abs_match.group(4) else 0
+            minute = int(abs_match.group(5)) if abs_match.group(5) else 0
+            try:
+                created_at = datetime(year, month, day, hour, minute, tzinfo=_LOCAL_TZ)
+                return abs_match.group(0), created_at
+            except ValueError:
+                return abs_match.group(0), None
+
+    return None, None
+
+
 def _extract_ads_from_dom_text(
     ad_text: str,
     href: str,
@@ -500,6 +556,7 @@ def _extract_ads_from_dom_text(
         district_slug = _map_tashkent_district_label_to_slug(district) or _detect_tashkent_district_slug(
             f"{title} {cleaned_full_text}"
         )
+        created_at_text, published_at = _extract_created_at_from_text(cleaned_full_text)
         # If we can map district label -> slug, overwrite `city` with district slug.
         # This is crucial when worker fetches from `/tashkent/` but we need per-district matching.
         parsed_city = district_slug or city
@@ -531,6 +588,8 @@ def _extract_ads_from_dom_text(
             ad_type=ad_type,
             city=parsed_city,
             district=district,
+            created_at_text=created_at_text,
+            published_at=published_at,
         )
     except Exception:
         logger.exception("Failed to build ParsedAd from DOM")
@@ -750,6 +809,7 @@ async def fetch_ad_details(url: str) -> dict[str, str | int | None]:
         "description": None,
         "author_name": None,
         "created_at_text": None,
+        "published_at": None,
         "district_slug": None,
         "district_label": None,
     }
@@ -802,13 +862,13 @@ async def fetch_ad_details(url: str) -> dict[str, str | int | None]:
                     break
 
             created_at_text = None
-            created_match = re.search(
-                r"(?:Опубликовано|Размещено|Создано)\s*[:\-]?\s*([^\n]+)",
-                page_text or "",
-                re.IGNORECASE,
-            )
+            published_at = None
+            created_match = re.search(r"(?:Опубликовано|Размещено|Создано)\s*[:\-]?\s*([^\n]+)", page_text or "", re.IGNORECASE)
             if created_match:
                 created_at_text = _normalize_space(created_match.group(1))
+                _, published_at = _extract_created_at_from_text(created_at_text)
+            else:
+                created_at_text, published_at = _extract_created_at_from_text(page_text)
 
             floor, total_floors = _extract_floor_info(page_text)
             area = _parse_area(page_text)
@@ -824,6 +884,7 @@ async def fetch_ad_details(url: str) -> dict[str, str | int | None]:
                     "description": description,
                     "author_name": author_name,
                     "created_at_text": created_at_text,
+                    "published_at": published_at.isoformat() if published_at else None,
                     "district_slug": district_slug,
                     "district_label": district_label,
                 }
@@ -841,6 +902,13 @@ async def enrich_ad_with_details(ad: ParsedAd) -> ParsedAd:
     district_label = details.get("district_label")
     rooms = details.get("rooms")
     area = details.get("area")
+    published_at_raw = details.get("published_at")
+    published_at = None
+    if isinstance(published_at_raw, str):
+        try:
+            published_at = datetime.fromisoformat(published_at_raw)
+        except ValueError:
+            published_at = None
     return replace(
         ad,
         city=district_slug if isinstance(district_slug, str) and district_slug else ad.city,
@@ -852,6 +920,7 @@ async def enrich_ad_with_details(ad: ParsedAd) -> ParsedAd:
         description=details.get("description"),
         author_name=details.get("author_name"),
         created_at_text=details.get("created_at_text"),
+        published_at=published_at or ad.published_at,
     )
 
 

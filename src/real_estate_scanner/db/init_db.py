@@ -95,4 +95,21 @@ async def init_db() -> None:
                 """
             )
         )
+        await conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS sale_broadcast_states (
+                    user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                    is_active BOOLEAN NOT NULL DEFAULT FALSE,
+                    started_at TIMESTAMPTZ NULL,
+                    window_start TIMESTAMPTZ NULL,
+                    window_end TIMESTAMPTZ NULL,
+                    last_batch_at TIMESTAMPTZ NULL,
+                    total_found BIGINT NOT NULL DEFAULT 0,
+                    pending_ads JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    sent_olx_ids JSONB NOT NULL DEFAULT '[]'::jsonb
+                )
+                """
+            )
+        )
 
