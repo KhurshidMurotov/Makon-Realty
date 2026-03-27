@@ -1,0 +1,4 @@
+# file: C:\Users\User\Desktop\real estate parcer\Real-Estate-Scanner\src\real_estate_scanner\db\models.py
+# hypothesis_version: 6.151.9
+
+[128, "'[]'::jsonb", "'{}'::jsonb", '0', 'CASCADE', 'Filter', 'User', 'ads', 'all, delete-orphan', 'false', 'filters', 'sale_broadcast_state', 'user', 'users', 'users.id']

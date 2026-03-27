@@ -1,0 +1,4 @@
+# file: C:\Users\User\AppData\Roaming\Python\Python312\site-packages\asyncpg\pgproto\types.py
+# hypothesis_version: 6.151.9
+
+['0', '<BitString {}>', 'BitString', 'Box', 'Circle', 'Line', 'LineSegment', 'Path', 'Point', 'Polygon', '_bitlength', '_bytes', '_is_closed', 'big', 'index out of range', 'little', 'points', '{}.{}({})']

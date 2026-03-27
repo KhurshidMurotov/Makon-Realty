@@ -1,0 +1,4 @@
+# file: C:\Users\User\AppData\Roaming\Python\Python312\site-packages\playwright\_impl\_browser.py
+# hypothesis_version: 6.151.9
+
+['BrowserType', 'Create page', 'close', 'context', 'disconnected', 'newBrowserCDPSession', 'newContext', 'page', 'path', 'reason', 'startTracing', 'stopTracing', 'version', 'wb']

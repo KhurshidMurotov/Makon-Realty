@@ -1,0 +1,4 @@
+# file: C:\Users\User\Desktop\real estate parcer\Real-Estate-Scanner\src\real_estate_scanner\config.py
+# hypothesis_version: 6.151.9
+
+[12000.0, '.env', 'https://www.olx.uz', 'ignore']

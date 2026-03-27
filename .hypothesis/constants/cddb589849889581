@@ -1,0 +1,4 @@
+# file: C:\Users\User\AppData\Roaming\Python\Python312\site-packages\asyncpg\pool.py
+# hypothesis_version: 6.151.9
+
+[300.0, 50000, 'Pool', '_', '__doc__', '_closed', '_closing', '_con', '_connect', '_connect_args', '_connect_kwargs', '_connection_class', '_generation', '_holder', '_holders', '_in_use', '_inactive_callback', '_init', '_initialized', '_initializing', '_loop', '_max_inactive_time', '_max_queries', '_maxsize', '_minsize', '_pool', '_proxy', '_queue', '_record_class', '_reset', '_setup', '_timeout', 'builtins', 'connection', 'done', 'pool', 'pool is closed', 'pool is closing', 'timeout']

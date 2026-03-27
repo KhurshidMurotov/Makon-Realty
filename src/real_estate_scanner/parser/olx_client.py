@@ -1,18 +1,18 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Any, Callable
 from urllib.parse import urljoin
 from zoneinfo import ZoneInfo
 
 from playwright.async_api import Browser, Page, async_playwright
 from playwright_stealth import Stealth
+from typing import Optional
 
 from real_estate_scanner.config import settings
 
@@ -45,11 +45,13 @@ class ParsedAd:
     area: float | None
     ad_type: str
     city: str
+    image_urls: list[str] = field(default_factory=list)
     district: str | None = None
     floor: int | None = None
     total_floors: int | None = None
     description: str | None = None
     author_name: str | None = None
+    owner_type: str | None = None
     created_at_text: str | None = None
     published_at: datetime | None = None
 
@@ -299,10 +301,35 @@ _RE_AREA_WORDY = re.compile(r"(?P<area>\d+(?:[.,]\d+)?)\s*квад\w*", re.IGNOR
 _RE_AREA_LAT_WORDY = re.compile(r"(?P<area>\d+(?:[.,]\d+)?)\s*(?:kv|kvm|kvmetr|kv metr)\b", re.IGNORECASE)
 _RE_AREA_INLINE = re.compile(r"(?P<area>\d+(?:[.,]\d+)?)\s*(?:sq\s*m|square\s*meters?)", re.IGNORECASE)
 _RE_AREA_KV_SHORT = re.compile(r"(?P<area>\d+(?:[.,]\d+)?)\s*кв\b", re.IGNORECASE)
+_RE_LAYOUT_TRIPLET = re.compile(r"\b\d+\s*/\s*\d+\s*/\s*\d+\b")
+REQUIRED_FIELDS = {"rooms", "area", "floor", "total_floors"}
 
 
 def _normalize_space(s: str) -> str:
     return re.sub(r"\s+", " ", s or "").strip()
+
+
+def _safe_int(value: str | None) -> int | None:
+    if not value:
+        return None
+    match = re.search(r"\d+", value)
+    return int(match.group()) if match else None
+
+
+def _safe_float(value: str | None) -> float | None:
+    if not value:
+        return None
+    match = re.search(r"\d+(?:[.,]\d+)?", value)
+    if not match:
+        return None
+    try:
+        return float(match.group().replace(",", "."))
+    except ValueError:
+        return None
+
+
+def _contains_layout_triplet(text: str | None) -> bool:
+    return bool(text and _RE_LAYOUT_TRIPLET.search(text))
 
 
 def _clean_text_for_parsing(text: str) -> str:
@@ -498,6 +525,58 @@ def _extract_floor_info(text: str) -> tuple[int | None, int | None]:
     return None, None
 
 
+def _extract_labeled_area(text: str) -> float | None:
+    area_tokens = (
+        "\u043e\u0431\u0449\u0430\u044f \u043f\u043b\u043e\u0449\u0430\u0434\u044c",
+        "\u0436\u0438\u043b\u0430\u044f \u043f\u043b\u043e\u0449\u0430\u0434\u044c",
+        "total area",
+        "living area",
+    )
+    for raw_line in (text or "").splitlines():
+        line = _normalize_space(raw_line.replace("\u00A0", " ").replace("\u202F", " "))
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        key_norm = key.casefold()
+        if not any(token in key_norm for token in area_tokens):
+            continue
+        area = _safe_float(value)
+        if area is not None and 20 <= area <= 500:
+            return area
+    return None
+
+
+def _extract_labeled_floor_info(text: str) -> tuple[int | None, int | None]:
+    floor = None
+    total = None
+    floor_tokens = (
+        "\u044d\u0442\u0430\u0436",
+        "floor",
+    )
+    total_tokens = (
+        "\u044d\u0442\u0430\u0436\u043d\u043e\u0441\u0442\u044c \u0434\u043e\u043c\u0430",
+        "\u044d\u0442\u0430\u0436\u043d\u043e\u0441\u0442\u044c",
+        "total floors",
+        "building floors",
+    )
+
+    for raw_line in (text or "").splitlines():
+        line = _normalize_space(raw_line.replace("\u00A0", " ").replace("\u202F", " "))
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        key_norm = key.casefold()
+        if total is None and any(token in key_norm for token in total_tokens):
+            total = _safe_int(value)
+            continue
+        if floor is None and any(token in key_norm for token in floor_tokens):
+            floor = _safe_int(value)
+
+    if floor is None and total is None:
+        return None, None
+    return floor, total
+
+
 def _extract_created_at_from_text(text: str) -> tuple[str | None, datetime | None]:
     if not text:
         return None, None
@@ -536,65 +615,6 @@ def _extract_created_at_from_text(text: str) -> tuple[str | None, datetime | Non
     return None, None
 
 
-def _extract_labeled_room_count(text: str) -> int | None:
-    cleaned = _clean_text_for_parsing(text)
-    patterns = (
-        re.compile(r"(?:колич(?:ество)?\s*комнат|комнаты)\s*[:\-]?\s*(?P<rooms>\d+)", re.IGNORECASE),
-        re.compile(r"(?P<rooms>\d+)\s*кв\b", re.IGNORECASE),
-    )
-    for pattern in patterns:
-        match = pattern.search(cleaned)
-        if not match:
-            continue
-        try:
-            value = int(match.group("rooms"))
-        except ValueError:
-            continue
-        if 1 <= value <= 10:
-            return value
-    return None
-
-
-def _extract_labeled_area(text: str) -> float | None:
-    cleaned = _clean_text_for_parsing(text)
-    patterns = (
-        re.compile(r"(?:общая\s*площадь|площадь)\s*[:\-]?\s*(?P<area>\d+(?:[.,]\d+)?)", re.IGNORECASE),
-        re.compile(r"(?:участок|жил(?:ая)?\s*площадь)\s*[:\-]?\s*(?P<area>\d+(?:[.,]\d+)?)", re.IGNORECASE),
-    )
-    for pattern in patterns:
-        match = pattern.search(cleaned)
-        if not match:
-            continue
-        try:
-            value = float(match.group("area").replace(",", "."))
-        except ValueError:
-            continue
-        if 20 <= value <= 500:
-            return value
-    return None
-
-
-def _extract_labeled_floor_info(text: str) -> tuple[int | None, int | None]:
-    cleaned = _clean_text_for_parsing(text)
-    floor_match = re.search(r"этаж\s*[:\-]?\s*(?P<floor>\d+)", cleaned, re.IGNORECASE)
-    total_match = re.search(r"этажн(?:ость)?\s*[:\-]?\s*(?P<total>\d+)", cleaned, re.IGNORECASE)
-    floor = int(floor_match.group("floor")) if floor_match else None
-    total = int(total_match.group("total")) if total_match else None
-    return floor, total
-
-
-def _extract_parameter_map(text: str) -> dict[str, str]:
-    result: dict[str, str] = {}
-    for raw_line in (text or "").splitlines():
-        line = _normalize_space(raw_line)
-        if not line or ":" not in line:
-            continue
-        key, value = line.split(":", 1)
-        key = _normalize_space(key).casefold()
-        value = _normalize_space(value)
-        if key and value:
-            result[key] = value
-    return result
 
 
 def _extract_first_src_from_srcset(srcset: str | None) -> str | None:
@@ -622,6 +642,124 @@ def _pick_best_image_url(*candidates: str | None) -> str | None:
     return None
 
 
+def _first_param_value(params: dict[str, str], *keys: str) -> str | None:
+    for key in keys:
+        normalized_key = _normalize_space(key).casefold()
+        if normalized_key in params:
+            return params[normalized_key]
+    return None
+
+
+def _extract_parameter_map(text: str | None) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for raw_line in (text or "").splitlines():
+        line = _normalize_space(raw_line)
+        if not line or ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        normalized_key = _normalize_space(key).casefold()
+        normalized_value = _normalize_space(value)
+        if normalized_key and normalized_value:
+            result[normalized_key] = normalized_value
+    return result
+
+
+async def _extract_parameters_from_dom(page: Page) -> dict[str, str]:
+    selectors = (
+        '[data-testid="ad-parameters-container"] p',
+        '[data-testid="qa-advert-parameters"] p',
+        '[data-cy="ad-parameters"] p',
+    )
+
+    lines: list[str] = []
+    for selector in selectors:
+        try:
+            extracted = await page.eval_on_selector_all(
+                selector,
+                """(els) => els
+                    .map(el => (el.innerText || el.textContent || '').trim())
+                    .filter(Boolean)
+                """,
+            )
+        except Exception:
+            continue
+        if extracted:
+            lines.extend(str(item) for item in extracted if str(item).strip())
+
+    return _extract_parameter_map("\n".join(lines))
+
+
+def extract_field(
+    *,
+    field_name: str,
+    strong_extractors: list[Callable[[], Any]],
+    labeled_extractors: list[Callable[[], Any]],
+    weak_extractors: list[Callable[[], Any]],
+    text: str | None = None,
+    block_weak_patterns: list[re.Pattern[str]] | None = None,
+    required: bool = False,
+    url: str | None = None,
+) -> Any:
+    strong_result = None
+    for extractor in strong_extractors:
+        value = extractor()
+        if value is not None:
+            return value
+        strong_result = value
+
+    labeled_result = None
+    for extractor in labeled_extractors:
+        value = extractor()
+        if value is not None:
+            return value
+        labeled_result = value
+
+    weak_blocked = bool(text and block_weak_patterns and any(pattern.search(text) for pattern in block_weak_patterns))
+    if weak_blocked:
+        logger.debug(
+            "OLX weak blocked: field=%s text=%s",
+            field_name,
+            (text or "")[:100],
+        )
+
+    if required:
+        debug_value = None
+        if not weak_blocked:
+            for extractor in weak_extractors:
+                value = extractor()
+                if value is not None:
+                    debug_value = value
+                    break
+        logger.error(
+            "OLX REQUIRED FIELD MISSING: field=%s url=%s",
+            field_name,
+            url,
+        )
+        logger.error(
+            "OLX extract failed: field=%s | strong=%s | labeled=%s | weak_candidate=%s | text_sample=%s | url=%s",
+            field_name,
+            strong_result,
+            labeled_result,
+            debug_value,
+            text[:120] if text else None,
+            url,
+        )
+        return None
+
+    if not weak_blocked:
+        for extractor in weak_extractors:
+            value = extractor()
+            if value is not None:
+                return value
+
+    logger.debug(
+        "OLX missing field after extraction: field=%s url=%s",
+        field_name,
+        url,
+    )
+    return None
+
+
 def _extract_ads_from_dom_text(
     ad_text: str,
     href: str,
@@ -631,6 +769,7 @@ def _extract_ads_from_dom_text(
     base_url: str,
     price_text: str | None = None,
     image_url: str | None = None,
+    params: list[str] | None = None,
     rooms_text: str | None = None,
     area_text: str | None = None,
 ) -> ParsedAd | None:
@@ -640,11 +779,19 @@ def _extract_ads_from_dom_text(
         if price is None:
             return None
         cleaned_full_text = _clean_text_for_parsing(ad_text)
-        rooms_source = rooms_text or cleaned_full_text
-        area_source = area_text or cleaned_full_text
-
-        rooms = _parse_rooms(rooms_source)
-        area = _parse_area(area_source)
+        params_lines = [_normalize_space(item) for item in (params or []) if _normalize_space(item)]
+        params_text = "\n".join(dict.fromkeys(params_lines))
+        parameter_map = _extract_parameter_map(params_text)
+        rooms = _extract_rooms_value(
+            params=parameter_map,
+            params_text=params_text or (rooms_text or ""),
+            fallback_text=rooms_text or title,
+        )
+        area = _extract_area_value(
+            params=parameter_map,
+            params_text=params_text or (area_text or ""),
+            fallback_text=area_text,
+        )
         district = _parse_district_label(cleaned_full_text)
         district_slug = _map_tashkent_district_label_to_slug(district) or _detect_tashkent_district_slug(
             f"{title} {cleaned_full_text}"
@@ -654,9 +801,6 @@ def _extract_ads_from_dom_text(
         # This is crucial when worker fetches from `/tashkent/` but we need per-district matching.
         parsed_city = district_slug or city
 
-        # Rooms fallback: try to parse rooms from title if not found in the card text.
-        if rooms is None:
-            rooms = _parse_rooms(title)
         link = href if href.startswith("http") else urljoin(base_url, href)
         resolved_image = image_url
         if resolved_image and not resolved_image.startswith("http"):
@@ -666,9 +810,9 @@ def _extract_ads_from_dom_text(
         # Debug logging for parsing failures.
         sample = _normalize_space(ad_text)[:100]
         if rooms is None:
-            logger.warning("OLX parse: rooms not found. text[:100]=%r", sample)
+            logger.debug("OLX parse: rooms not found. text[:100]=%r", sample)
         if area is None:
-            logger.warning("OLX parse: area not found. text[:100]=%r", sample)
+            logger.debug("OLX parse: area not found. text[:100]=%r", sample)
 
         return ParsedAd(
             olx_id=olx_id,
@@ -680,6 +824,7 @@ def _extract_ads_from_dom_text(
             area=area,
             ad_type=ad_type,
             city=parsed_city,
+            image_urls=[resolved_image] if resolved_image else [],
             district=district,
             created_at_text=created_at_text,
             published_at=published_at,
@@ -687,6 +832,167 @@ def _extract_ads_from_dom_text(
     except Exception:
         logger.exception("Failed to build ParsedAd from DOM")
         return None
+
+
+def _extract_labeled_room_count(text: str) -> int | None:
+    room_tokens = (
+        "\u043a\u043e\u043c\u043d\u0430\u0442",
+        "\u043a\u043e\u043c\u043d\u0430\u0442\u044b",
+        "\u043a\u043e\u043b\u0438\u0447\u0435\u0441\u0442\u0432\u043e \u043a\u043e\u043c\u043d\u0430\u0442",
+        "\u043a\u043e\u043c\u043d\u0430\u0442\u044b",
+        "\u043a\u043e\u043c\u043d\u0430\u0442\u0430",
+        "\u043a\u043e\u043c\u043d\u0430\u0442\u043d\u043e\u0441\u0442\u044c",
+    )
+    for raw_line in (text or "").splitlines():
+        line = _normalize_space(raw_line.replace("\u00A0", " ").replace("\u202F", " "))
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        key_norm = key.casefold()
+        if not any(token in key_norm for token in room_tokens):
+            continue
+        rooms = _safe_int(value)
+        if rooms is not None and 1 <= rooms <= 10:
+            return rooms
+    return None
+
+
+def _extract_area_value(
+    *,
+    params: dict[str, str],
+    params_text: str,
+    fallback_text: str | None = None,
+    required: bool = False,
+    url: str | None = None,
+) -> float | None:
+    def _strong_param_area() -> float | None:
+        value = _safe_float(
+            _first_param_value(
+                params,
+                "\u043e\u0431\u0449\u0430\u044f \u043f\u043b\u043e\u0449\u0430\u0434\u044c",
+                "\u0436\u0438\u043b\u0430\u044f \u043f\u043b\u043e\u0449\u0430\u0434\u044c",
+                "\u043e\u0431\u0449\u0430\u044f \u043f\u043b\u043e\u0449\u0430\u0434\u044c",
+                "\u0436\u0438\u043b\u0430\u044f \u043f\u043b\u043e\u0449\u0430\u0434\u044c",
+                "\u043e\u0431\u0449\u0435\u0439 \u043f\u043b\u043e\u0449\u0430\u0434\u0438",
+                "\u0436\u0438\u043b\u043e\u0439 \u043f\u043b\u043e\u0449\u0430\u0434\u0438",
+            )
+        )
+        if value is not None and 20 <= value <= 500:
+            return value
+        return None
+
+    return extract_field(
+        field_name="area",
+        strong_extractors=[_strong_param_area],
+        labeled_extractors=[lambda: _extract_labeled_area(params_text)],
+        weak_extractors=[
+            lambda: _parse_area(params_text),
+            lambda: _extract_labeled_area(fallback_text or ""),
+            lambda: _parse_area(fallback_text or ""),
+        ],
+        text=params_text or fallback_text,
+        required=required,
+        url=url,
+    )
+
+
+def _extract_rooms_value(
+    *,
+    params: dict[str, str],
+    params_text: str,
+    fallback_text: str | None = None,
+    required: bool = False,
+    url: str | None = None,
+) -> int | None:
+    return extract_field(
+        field_name="rooms",
+        strong_extractors=[
+            lambda: _safe_int(
+                _first_param_value(
+                    params,
+                    "\u043a\u043e\u043b\u0438\u0447\u0435\u0441\u0442\u0432\u043e \u043a\u043e\u043c\u043d\u0430\u0442",
+                    "\u043a\u043e\u043c\u043d\u0430\u0442\u044b",
+                    "\u043a\u043e\u043b\u0438\u0447\u0435\u0441\u0442\u0432\u043e \u043a\u043e\u043c\u043d\u0430\u0442",
+                    "\u043a\u043e\u043c\u043d\u0430\u0442\u044b",
+                    "\u043a\u043e\u043b\u0438\u0447\u0435\u0441\u0442\u0432\u0430 \u043a\u043e\u043c\u043d\u0430\u0442",
+                    "\u043a\u043e\u043c\u043d\u0430\u0442\u0430",
+                )
+            )
+        ],
+        labeled_extractors=[lambda: _extract_labeled_room_count(params_text)],
+        weak_extractors=[
+            lambda: _parse_rooms(params_text),
+            lambda: _extract_labeled_room_count(fallback_text or ""),
+            lambda: _parse_rooms(fallback_text or ""),
+        ],
+        text=params_text or fallback_text,
+        block_weak_patterns=[_RE_LAYOUT_TRIPLET],
+        required=required,
+        url=url,
+    )
+
+
+def _extract_floor_values(
+    *,
+    params: dict[str, str],
+    params_text: str,
+    fallback_text: str | None = None,
+    required: bool = False,
+    url: str | None = None,
+) -> tuple[int | None, int | None]:
+    labeled_floor, labeled_total = _extract_labeled_floor_info(params_text)
+    weak_floor, weak_total = _extract_floor_info(params_text)
+    fallback_labeled_floor, fallback_labeled_total = _extract_labeled_floor_info(fallback_text or "")
+    fallback_weak_floor, fallback_weak_total = _extract_floor_info(fallback_text or "")
+
+    floor = extract_field(
+        field_name="floor",
+        strong_extractors=[
+            lambda: _safe_int(
+                _first_param_value(
+                    params,
+                    "\u044d\u0442\u0430\u0436",
+                    "\u044d\u0442\u0430\u0436",
+                    "\u044d\u0442\u0430\u0436\u0430",
+                )
+            )
+        ],
+        labeled_extractors=[lambda: labeled_floor],
+        weak_extractors=[
+            lambda: weak_floor,
+            lambda: fallback_labeled_floor,
+            lambda: fallback_weak_floor,
+        ],
+        text=params_text or fallback_text,
+        required=required,
+        url=url,
+    )
+    total_floors = extract_field(
+        field_name="total_floors",
+        strong_extractors=[
+            lambda: _safe_int(
+                _first_param_value(
+                    params,
+                    "\u044d\u0442\u0430\u0436\u043d\u043e\u0441\u0442\u044c \u0434\u043e\u043c\u0430",
+                    "\u044d\u0442\u0430\u0436\u043d\u043e\u0441\u0442\u044c",
+                    "\u044d\u0442\u0430\u0436\u043d\u043e\u0441\u0442\u044c \u0434\u043e\u043c\u0430",
+                    "\u044d\u0442\u0430\u0436\u043d\u043e\u0441\u0442\u044c",
+                    "\u044d\u0442\u0430\u0436\u043d\u043e\u0441\u0442\u0438 \u0434\u043e\u043c\u0430",
+                    "\u044d\u0442\u0430\u0436\u043d\u043e\u0441\u0442\u0438",
+                )
+            )
+        ],
+        labeled_extractors=[lambda: labeled_total],
+        weak_extractors=[
+            lambda: weak_total,
+            lambda: fallback_labeled_total,
+            lambda: fallback_weak_total,
+        ],
+        text=params_text or fallback_text,
+        required=required,
+        url=url,
+    )
+    return floor, total_floors
 
 
 async def _auto_scroll(page: Page, steps: int = 4, delay_ms: int = 600) -> None:
@@ -697,7 +1003,7 @@ async def _auto_scroll(page: Page, steps: int = 4, delay_ms: int = 600) -> None:
 
 async def _collect_candidate_ads(
     page: Page,
-) -> list[tuple[str, str, str, str, str | None, str | None, str | None]]:
+) -> list[dict[str, Any]]:
     """
     Возвращает кортежи (href, title, price_text, card_text, rooms_text, area_text, image_url).
 
@@ -705,9 +1011,7 @@ async def _collect_candidate_ads(
     берём все ссылки, ведущие на объявления (`/d/obyavlenie/...`),
     и читаем innerText родственного карточного контейнера.
     """
-    async def _extract_with_selector(
-        selector: str,
-    ) -> list[tuple[str, str, str, str, str | None, str | None, str | None]]:
+    async def _extract_with_selector(selector: str) -> list[dict[str, Any]]:
         candidates = await page.eval_on_selector_all(
             selector,
         """
@@ -730,6 +1034,9 @@ async def _collect_candidate_ads(
             const title = (titleNode?.innerText || titleNode?.textContent || '').trim();
             const priceText = priceNode ? (priceNode.innerText || priceNode.textContent || '').trim() : null;
             const text = (card && card.innerText ? card.innerText : (el.innerText || el.textContent || '')).trim();
+            const params = Array.from(card?.querySelectorAll('p') || [])
+              .map(p => (p.innerText || p.textContent || '').trim())
+              .filter(Boolean);
             const roomsNode =
               card?.querySelector('[data-testid*="rooms"]') ||
               card?.querySelector('[data-testid*="комн"]') ||
@@ -749,26 +1056,12 @@ async def _collect_candidate_ads(
               ? (img.currentSrc || img.src || img.getAttribute('src') || img.getAttribute('data-src') || null)
               : null;
 
-            return { href, title, priceText, text, roomsText, areaText, imageUrl };
+            return { href, title, priceText, text, params, roomsText, areaText, imageUrl };
           })
           .filter(x => x.href)
         """,
         )
-
-        result: list[tuple[str, str, str, str, str | None, str | None, str | None]] = []
-        for c in candidates:
-            result.append(
-                (
-                    c["href"],
-                    c["title"],
-                    c["priceText"] or "",
-                    c["text"],
-                    c["roomsText"],
-                    c["areaText"],
-                    c["imageUrl"],
-                )
-            )
-        return result
+        return list(candidates)
 
     # 1) Plan A: use known grid/card markers if present.
     primary_selector = (
@@ -808,81 +1101,115 @@ async def fetch_ads_from_search(
 
     try:
         async with Stealth().use_async(async_playwright()) as p:
-            browser: Browser = await p.chromium.launch(headless=headless)
-            page: Page = await browser.new_page()
-
-            logger.info("OLX navigate: %s", url)
-            await page.goto(url, wait_until="domcontentloaded")
-            # Strong waits: OLX is heavily JS-driven; we need deterministic rendering.
+            browser: Browser | None = None
+            context = None
+            page: Page | None = None
             try:
-                await page.wait_for_load_state("networkidle")
-            except Exception:
-                logger.debug("OLX: wait_for_load_state(networkidle) failed; continuing anyway")
+                browser = await p.chromium.launch(headless=headless)
+                context = await browser.new_context()
+                page = await context.new_page()
 
-            await asyncio.sleep(5)
-
-            try:
-                page_title = await page.title()
-                logger.info("Page title: %s", page_title)
-                if page_title and ("Access Denied" in page_title or "Just a moment" in page_title):
-                    logger.warning("OLX: possible block/captcha detected (title=%s)", page_title)
-            except Exception:
-                logger.debug("OLX: page.title() failed")
-
-            candidates = await _collect_candidate_ads(page)
-            logger.info("OLX: candidates=%s for url=%s", len(candidates), url)
-
-            if len(candidates) == 0:
-                screenshot_path = str(repo_root / "debug_screenshot.png")
+                logger.info("OLX navigate: %s", url)
+                await page.goto(url, wait_until="domcontentloaded")
+                # Strong waits: OLX is heavily JS-driven; we need deterministic rendering.
                 try:
-                    await page.screenshot(path=screenshot_path, full_page=True)
-                    logger.warning("OLX: candidates==0, screenshot saved: %s", screenshot_path)
+                    await page.wait_for_load_state("networkidle")
                 except Exception:
-                    logger.warning("OLX: candidates==0, failed to save screenshot")
+                    logger.debug("OLX: wait_for_load_state(networkidle) failed; continuing anyway")
 
-            count = 0
-            for href, title, price_text, text, rooms_text, area_text, image_url in candidates:
-                if count >= limit:
-                    break
-
-                parsed = _extract_ads_from_dom_text(
-                    ad_text=text,
-                    href=href,
-                    title_fallback=title or text,
-                    ad_type=ad_type,
-                    city=city,
-                    base_url=base_url,
-                    price_text=price_text or None,
-                    image_url=image_url,
-                    rooms_text=rooms_text,
-                    area_text=area_text,
-                )
-                if parsed is not None:
-                    ads.append(parsed)
-                    count += 1
-
-            if not ads:
-                # Print HTML of the first card to debug selector breakage.
                 try:
-                    card_html = await page.inner_html('[data-cy="l-card"]')
+                    await page.wait_for_selector(
+                        "a[href*=\"/d/obyavlenie/\"], div[data-testid=\"listing-grid\"]",
+                        timeout=5000,
+                    )
                 except Exception:
-                    card_html = None
+                    await page.wait_for_timeout(1200)
 
-                if not card_html:
+                try:
+                    page_title = await page.title()
+                    logger.info("Page title: %s", page_title)
+                    if page_title and ("Access Denied" in page_title or "Just a moment" in page_title):
+                        logger.warning("OLX: possible block/captcha detected (title=%s)", page_title)
+                except Exception:
+                    logger.debug("OLX: page.title() failed")
+
+                candidates = await _collect_candidate_ads(page)
+                logger.info("OLX: candidates=%s for url=%s", len(candidates), url)
+
+                if len(candidates) == 0:
+                    screenshot_path = str(repo_root / "debug_screenshot.png")
                     try:
-                        card_html = await page.inner_html('div[data-testid="listing-grid"]')
+                        await page.screenshot(path=screenshot_path, full_page=True)
+                        logger.warning("OLX: candidates==0, screenshot saved: %s", screenshot_path)
+                    except Exception:
+                        logger.warning("OLX: candidates==0, failed to save screenshot")
+
+                count = 0
+                for candidate in candidates:
+                    if count >= limit:
+                        break
+
+                    href = candidate.get("href") or ""
+                    title = candidate.get("title") or ""
+                    price_text = candidate.get("priceText") or ""
+                    text = candidate.get("text") or ""
+                    rooms_text = candidate.get("roomsText")
+                    area_text = candidate.get("areaText")
+                    image_url = candidate.get("imageUrl")
+                    params = candidate.get("params") or []
+
+                    parsed = _extract_ads_from_dom_text(
+                        ad_text=text,
+                        href=href,
+                        title_fallback=title or text,
+                        ad_type=ad_type,
+                        city=city,
+                        base_url=base_url,
+                        price_text=price_text or None,
+                        image_url=image_url,
+                        params=params,
+                        rooms_text=rooms_text,
+                        area_text=area_text,
+                    )
+                    if parsed is not None:
+                        ads.append(parsed)
+                        count += 1
+
+                if not ads:
+                    try:
+                        card_html = await page.inner_html('[data-cy="l-card"]')
                     except Exception:
                         card_html = None
 
-                if card_html:
-                    logger.warning(
-                        "OLX: ads_count==0. First card html (truncated): %s",
-                        card_html[:2500],
-                    )
-                else:
-                    logger.warning("OLX: ads_count==0. Could not extract card HTML for debug.")
+                    if not card_html:
+                        try:
+                            card_html = await page.inner_html('div[data-testid="listing-grid"]')
+                        except Exception:
+                            card_html = None
 
-            await browser.close()
+                    if card_html:
+                        logger.warning(
+                            "OLX: ads_count==0. First card html (truncated): %s",
+                            card_html[:2500],
+                        )
+                    else:
+                        logger.warning("OLX: ads_count==0. Could not extract card HTML for debug.")
+            finally:
+                if page is not None:
+                    try:
+                        await page.close()
+                    except Exception:
+                        logger.debug("OLX: page.close() failed for search url=%s", url)
+                if context is not None:
+                    try:
+                        await context.close()
+                    except Exception:
+                        logger.debug("OLX: context.close() failed for search url=%s", url)
+                if browser is not None:
+                    try:
+                        await browser.close()
+                    except Exception:
+                        logger.debug("OLX: browser.close() failed for search url=%s", url)
 
     except Exception:
         logger.exception("fetch_ads_from_search failed (url=%s)", url)
@@ -901,199 +1228,201 @@ async def fetch_ad_details(url: str) -> dict[str, str | int | None]:
         "area": None,
         "description": None,
         "author_name": None,
+        "owner_type": None,
         "created_at_text": None,
         "published_at": None,
         "district_slug": None,
         "district_label": None,
         "image_url": None,
+        "image_urls": [],
     }
 
     try:
         async with Stealth().use_async(async_playwright()) as p:
-            browser: Browser = await p.chromium.launch(headless=headless)
-            page: Page = await browser.new_page()
-            page.set_default_timeout(12000)
-
-            await page.goto(url, wait_until="domcontentloaded", timeout=12000)
+            browser: Browser | None = None
+            context = None
+            page: Page | None = None
             try:
-                await page.wait_for_load_state("networkidle")
-            except Exception:
-                logger.debug("OLX details: wait_for_load_state(networkidle) failed for %s", url)
+                browser = await p.chromium.launch(headless=headless)
+                context = await browser.new_context()
+                page = await context.new_page()
+                page.set_default_timeout(12000)
 
-            await page.wait_for_timeout(1200)
-
-            page_text = await page.locator("body").inner_text()
-            params_blocks: list[str] = []
-            for selector in (
-                '[data-testid="ad-parameters-container"]',
-                '[data-testid="qa-advert-parameters"]',
-                '[data-cy="ad-parameters"]',
-            ):
+                await page.goto(url, wait_until="domcontentloaded", timeout=12000)
                 try:
-                    texts = await page.eval_on_selector_all(
-                        selector,
-                        "(els) => els.map(el => (el.innerText || el.textContent || '').trim()).filter(Boolean)",
-                    )
+                    await page.wait_for_load_state("networkidle")
                 except Exception:
-                    continue
-                params_blocks.extend(_normalize_space(text) for text in texts if _normalize_space(text))
+                    logger.debug("OLX details: wait_for_load_state(networkidle) failed for %s", url)
 
-            params_lines: list[str] = []
-            for selector in (
-                '[data-testid="ad-parameters-container"] p[data-nx-name="P3"]',
-                '[data-testid="ad-parameters-container"] p',
-                '[data-testid="ad-parameters-container"] li',
-                '[data-testid="ad-parameters-container"] button',
-                '[data-testid="ad-parameters-container"] div',
-                '[data-testid="qa-advert-parameters"] p',
-                '[data-cy="ad-parameters"] p',
-            ):
-                try:
-                    texts = await page.eval_on_selector_all(
-                        selector,
-                        "(els) => els.map(el => (el.innerText || el.textContent || '').trim()).filter(Boolean)",
-                    )
-                except Exception:
-                    continue
-                params_lines.extend(_normalize_space(text) for text in texts if _normalize_space(text))
+                await page.wait_for_timeout(1200)
 
-            params_text = "\n".join(dict.fromkeys([*params_blocks, *params_lines]))
-            parameter_map = _extract_parameter_map(params_text)
-            try:
-                price_text = await page.locator('[data-testid="ad-price-container"] h3').first.inner_text(timeout=1200)
-            except Exception:
-                price_text = None
+                parameter_map = await _extract_parameters_from_dom(page)
+                params_text = "\n".join(f"{key}: {value}" for key, value in parameter_map.items() if value)
+                page_text: str | None = None
 
-            image_url = None
-            for selector in (
-                'img[data-testid="swiper-image"]',
-                '[data-testid="ad-photo"] img',
-                '[data-testid="image-gallery-container"] img',
-                '.swiper-slide-active img',
-                '.swiper img',
-            ):
-                try:
-                    image_candidates = await page.eval_on_selector_all(
-                        selector,
-                        """
-                        (els) => els.map((el) => ({
-                          src: el.getAttribute('src'),
-                          currentSrc: el.currentSrc || null,
-                          srcset: el.getAttribute('srcset'),
-                          dataSrc: el.getAttribute('data-src'),
-                        }))
-                        """,
+                image_url = None
+                image_urls: list[str] = []
+                for selector in (
+                    'img[data-testid="swiper-image"]',
+                    '[data-testid="ad-photo"] img',
+                    '[data-testid="image-gallery-container"] img',
+                    '.swiper-slide-active img',
+                    '.swiper img',
+                ):
+                    try:
+                        image_candidates = await page.eval_on_selector_all(
+                            selector,
+                            """
+                            (els) => els.map((el) => ({
+                              src: el.getAttribute('src'),
+                              currentSrc: el.currentSrc || null,
+                              srcset: el.getAttribute('srcset'),
+                              dataSrc: el.getAttribute('data-src'),
+                            }))
+                            """,
+                        )
+                    except Exception:
+                        continue
+                    for item in image_candidates:
+                        candidate_url = _pick_best_image_url(
+                            item.get("currentSrc"),
+                            item.get("src"),
+                            item.get("dataSrc"),
+                            item.get("srcset"),
+                        )
+                        if candidate_url and candidate_url not in image_urls:
+                            image_urls.append(candidate_url)
+                    if image_urls:
+                        image_url = image_urls[0]
+
+                parsed_rooms = _extract_rooms_value(
+                    params=parameter_map,
+                    params_text=params_text,
+                    required="rooms" in REQUIRED_FIELDS,
+                    url=url,
+                )
+                area = _extract_area_value(
+                    params=parameter_map,
+                    params_text=params_text,
+                    required="area" in REQUIRED_FIELDS,
+                    url=url,
+                )
+                floor, total_floors = _extract_floor_values(
+                    params=parameter_map,
+                    params_text=params_text,
+                    required=("floor" in REQUIRED_FIELDS or "total_floors" in REQUIRED_FIELDS),
+                    url=url,
+                )
+
+                description = None
+                for selector in (
+                    '[data-cy="ad_description"]',
+                    '[data-testid="ad-description"]',
+                    'div[data-testid="description-content"]',
+                    'section div',
+                ):
+                    try:
+                        candidate = await page.locator(selector).first.inner_text(timeout=1500)
+                    except Exception:
+                        continue
+                    candidate = "\n".join(
+                        line
+                        for line in (_normalize_space(part) for part in candidate.splitlines())
+                        if line
                     )
-                except Exception:
-                    continue
-                for item in image_candidates:
-                    image_url = _pick_best_image_url(
-                        item.get("currentSrc"),
-                        item.get("src"),
-                        item.get("dataSrc"),
-                        item.get("srcset"),
-                    )
-                    if image_url:
+                    if candidate and len(candidate) > 20:
+                        description = candidate
                         break
-                if image_url:
-                    break
 
-            parsed_rooms = None
-            if not parsed_rooms:
-                parsed_rooms = _parse_rooms(parameter_map.get("количество комнат", ""))
-            for key in ("Количество комнат", "Комнаты"):
-                parsed_rooms = _parse_rooms(parameter_map.get(key.casefold(), "")) or parsed_rooms
-                if parsed_rooms:
-                    break
-            if not parsed_rooms:
-                parsed_rooms = _extract_labeled_room_count(params_text) or _parse_rooms(params_text)
-            if not parsed_rooms:
-                parsed_rooms = _parse_rooms(page_text) or _extract_labeled_room_count(page_text)
+                author_name = None
+                for selector in (
+                    '[data-testid="user-profile-name"]',
+                    '[data-cy="seller_card"] h4',
+                    '[data-testid="aside"] h4',
+                    'aside h4',
+                ):
+                    try:
+                        candidate = await page.locator(selector).first.inner_text(timeout=1500)
+                    except Exception:
+                        continue
+                    candidate = _normalize_space(candidate)
+                    if candidate:
+                        author_name = candidate
+                        break
 
-            description = None
-            for selector in (
-                '[data-cy="ad_description"]',
-                '[data-testid="ad-description"]',
-                'div[data-testid="description-content"]',
-                "section div",
-            ):
-                try:
-                    candidate = await page.locator(selector).first.inner_text(timeout=1500)
-                except Exception:
-                    continue
-                candidate = _normalize_space(candidate)
-                if candidate and len(candidate) > 20:
-                    description = candidate
-                    break
+                owner_type = None
+                owner_keys = set(parameter_map)
+                if "\u0447\u0430\u0441\u0442\u043d\u043e\u0435 \u043b\u0438\u0446\u043e" in owner_keys:
+                    owner_type = "\u0427\u0430\u0441\u0442\u043d\u043e\u0435 \u043b\u0438\u0446\u043e"
+                elif "\u0431\u0438\u0437\u043d\u0435\u0441" in owner_keys:
+                    owner_type = "\u0411\u0438\u0437\u043d\u0435\u0441"
+                else:
+                    page_text = page_text or await page.locator("body").inner_text()
+                    for pattern in (
+                        r"\b(\u0447\u0430\u0441\u0442\u043d\u043e\u0435 \u043b\u0438\u0446\u043e)\b",
+                        r"\b(\u0431\u0438\u0437\u043d\u0435\u0441)\b",
+                        r"\b(\u0447\u0430\u0441\u0442\u043d\u043e\u0435)\b",
+                    ):
+                        try:
+                            owner_match = re.search(pattern, page_text or "", re.IGNORECASE)
+                        except re.error:
+                            logger.warning("Invalid regex pattern: %s", pattern)
+                            continue
+                        if owner_match:
+                            owner_type = _normalize_space(owner_match.group(1))
+                            break
 
-            author_name = None
-            for selector in (
-                '[data-testid="user-profile-name"]',
-                '[data-cy="seller_card"] h4',
-                '[data-testid="aside"] h4',
-                "aside h4",
-            ):
-                try:
-                    candidate = await page.locator(selector).first.inner_text(timeout=1500)
-                except Exception:
-                    continue
-                candidate = _normalize_space(candidate)
-                if candidate:
-                    author_name = candidate
-                    break
+                page_text = page_text or await page.locator("body").inner_text()
+                created_at_text = None
+                published_at = None
+                created_match = re.search(
+                    r"(?:\u041e\u043f\u0443\u0431\u043b\u0438\u043a\u043e\u0432\u0430\u043d\u043e|\u0420\u0430\u0437\u043c\u0435\u0449\u0435\u043d\u043e|\u0421\u043e\u0437\u0434\u0430\u043d\u043e)\s*[:\-]?\s*([^\n]+)",
+                    page_text or "",
+                    re.IGNORECASE,
+                )
+                if created_match:
+                    created_at_text = _normalize_space(created_match.group(1))
+                    _, published_at = _extract_created_at_from_text(created_at_text)
+                else:
+                    created_at_text, published_at = _extract_created_at_from_text(page_text)
 
-            created_at_text = None
-            published_at = None
-            created_match = re.search(r"(?:Опубликовано|Размещено|Создано)\s*[:\-]?\s*([^\n]+)", page_text or "", re.IGNORECASE)
-            if created_match:
-                created_at_text = _normalize_space(created_match.group(1))
-                _, published_at = _extract_created_at_from_text(created_at_text)
-            else:
-                created_at_text, published_at = _extract_created_at_from_text(page_text)
-
-            floor, total_floors = _extract_floor_info(params_text)
-            labeled_floor, labeled_total_floors = _extract_labeled_floor_info(params_text)
-            if floor is None and total_floors is None:
-                floor, total_floors = _extract_floor_info(page_text)
-                labeled_floor, labeled_total_floors = _extract_labeled_floor_info(page_text)
-            floor = floor or labeled_floor
-            total_floors = total_floors or labeled_total_floors
-            area = _parse_area(params_text) or _extract_labeled_area(params_text)
-            if area is None:
-                area = _parse_area(page_text) or _extract_labeled_area(page_text)
-            if area is None:
-                area = _parse_area(parameter_map.get("общая площадь", "")) or _parse_area(parameter_map.get("жилая площадь", ""))
-            if floor is None and parameter_map.get("этаж"):
-                try:
-                    floor = int(re.search(r"\d+", parameter_map["этаж"]).group(0))
-                except Exception:
-                    pass
-            if total_floors is None and parameter_map.get("этажность дома"):
-                try:
-                    total_floors = int(re.search(r"\d+", parameter_map["этажность дома"]).group(0))
-                except Exception:
-                    pass
-            district_label = _parse_district_label(f"{params_text}\n{page_text}")
-            district_slug = _map_tashkent_district_label_to_slug(district_label) or _detect_tashkent_district_slug(
-                f"{params_text}\n{page_text}\n{description or ''}"
-            )
-
-            details.update(
-                {
-                    "rooms": parsed_rooms,
-                    "floor": floor,
-                    "total_floors": total_floors,
-                    "area": area,
-                    "description": description,
-                    "author_name": author_name,
-                    "created_at_text": created_at_text,
-                    "published_at": published_at.isoformat() if published_at else None,
-                    "district_slug": district_slug,
-                    "district_label": district_label,
-                    "image_url": image_url,
-                }
-            )
-            await browser.close()
+                district_label = _parse_district_label(f"{params_text}\n{page_text}")
+                district_slug = _map_tashkent_district_label_to_slug(district_label) or _detect_tashkent_district_slug(
+                    f"{params_text}\n{page_text}\n{description or ''}"
+                )
+                details.update(
+                    {
+                        "rooms": parsed_rooms,
+                        "floor": floor,
+                        "total_floors": total_floors,
+                        "area": area,
+                        "description": description,
+                        "author_name": author_name,
+                        "owner_type": owner_type,
+                        "created_at_text": created_at_text,
+                        "published_at": published_at.isoformat() if published_at else None,
+                        "district_slug": district_slug,
+                        "district_label": district_label,
+                        "image_url": image_url,
+                        "image_urls": image_urls,
+                    }
+                )
+            finally:
+                if page is not None:
+                    try:
+                        await page.close()
+                    except Exception:
+                        logger.debug("OLX: page.close() failed for details url=%s", url)
+                if context is not None:
+                    try:
+                        await context.close()
+                    except Exception:
+                        logger.debug("OLX: context.close() failed for details url=%s", url)
+                if browser is not None:
+                    try:
+                        await browser.close()
+                    except Exception:
+                        logger.debug("OLX: browser.close() failed for details url=%s", url)
     except Exception:
         logger.exception("fetch_ad_details failed (url=%s)", url)
 
@@ -1106,6 +1435,8 @@ async def enrich_ad_with_details(ad: ParsedAd) -> ParsedAd:
     district_label = details.get("district_label")
     rooms = details.get("rooms")
     area = details.get("area")
+    floor = details.get("floor")
+    total_floors = details.get("total_floors")
     published_at_raw = details.get("published_at")
     published_at = None
     if isinstance(published_at_raw, str):
@@ -1113,19 +1444,37 @@ async def enrich_ad_with_details(ad: ParsedAd) -> ParsedAd:
             published_at = datetime.fromisoformat(published_at_raw)
         except ValueError:
             published_at = None
+
+    for field, listing_value, detail_value in (
+        ("rooms", ad.rooms, rooms),
+        ("area", ad.area, area),
+        ("floor", ad.floor, floor),
+        ("total_floors", ad.total_floors, total_floors),
+    ):
+        if listing_value is not None and detail_value is not None and listing_value != detail_value:
+            logger.warning(
+                "OLX conflict: field=%s listing=%s detail=%s url=%s",
+                field,
+                listing_value,
+                detail_value,
+                ad.link,
+            )
+
     return replace(
         ad,
         city=district_slug if isinstance(district_slug, str) and district_slug else ad.city,
         district=district_label if isinstance(district_label, str) and district_label else ad.district,
-        rooms=rooms if isinstance(rooms, int) and ad.rooms is None else ad.rooms,
-        area=area if isinstance(area, (int, float)) and ad.area is None else ad.area,
-        floor=details.get("floor"),
-        total_floors=details.get("total_floors"),
-        description=details.get("description"),
-        author_name=details.get("author_name"),
-        created_at_text=details.get("created_at_text"),
+        rooms=rooms if isinstance(rooms, int) else ad.rooms,
+        area=area if isinstance(area, (int, float)) else ad.area,
+        floor=floor if isinstance(floor, int) else ad.floor,
+        total_floors=total_floors if isinstance(total_floors, int) else ad.total_floors,
+        description=details.get("description") or ad.description,
+        author_name=details.get("author_name") or ad.author_name,
+        owner_type=details.get("owner_type") or ad.owner_type,
+        created_at_text=details.get("created_at_text") or ad.created_at_text,
         published_at=published_at or ad.published_at,
         image_url=details.get("image_url") if isinstance(details.get("image_url"), str) and details.get("image_url") else ad.image_url,
+        image_urls=list(details.get("image_urls") or ad.image_urls or ([ad.image_url] if ad.image_url else [])),
     )
 
 
@@ -1140,4 +1489,3 @@ def build_search_url(*, ad_type: str, city_slug: str) -> str:
 # Compatibility alias (requested by QA tests)
 async def fetch_ads(*, url: str, ad_type: str, city: str, limit: int = 50) -> list[ParsedAd]:
     return await fetch_ads_from_search(url=url, ad_type=ad_type, city=city, limit=limit)
-

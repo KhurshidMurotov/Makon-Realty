@@ -1,0 +1,4 @@
+# file: C:\Users\User\AppData\Roaming\Python\Python312\site-packages\asyncpg\transaction.py
+# hypothesis_version: 6.151.9
+
+[' DEFERRABLE', ' READ ONLY', ';', '<{}.{} {} {:#x}>', 'BEGIN', 'COMMIT;', 'ROLLBACK TO {};', 'ROLLBACK;', 'SAVEPOINT {};', '__aexit__', '_connection', '_deferrable', '_id', '_isolation', '_managed', '_nested', '_readonly', '_state', 'asyncpg', 'asyncpg.', 'commit', 'deferrable', 'read committed', 'read uncommitted', 'read_committed', 'read_uncommitted', 'readonly', 'repeatable read', 'repeatable_read', 'rollback', 'savepoint', 'serializable', 'start', 'state:{}']

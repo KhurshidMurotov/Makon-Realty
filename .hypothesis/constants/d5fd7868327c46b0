@@ -1,0 +1,4 @@
+# file: C:\Users\User\AppData\Roaming\Python\Python312\site-packages\asyncpg\exceptions\_base.py
+# hypothesis_version: 6.151.9
+
+['\nDETAIL:  {}', '\nHINT:  {}', 'C', 'D', 'F', 'FatalPostgresError', 'H', 'InterfaceError', 'InterfaceWarning', 'InternalClientError', 'L', 'M', 'P', 'PostgresError', 'PostgresLogMessage', 'PostgresMessage', 'ProtocolError', 'R', 'S', 'UnknownPostgresError', 'V', 'W', 'WARNING', 'asyncpg', 'asyncpg.', 'c', 'column_name', 'constraint_name', 'context', 'd', 'data_type_name', 'detail', 'hint', 'internal_position', 'internal_query', 'message', 'n', 'p', 'position', 'q', 'query', 's', 'schema_name', 'server_source_line', 'severity', 'severity_en', 'sqlstate', 't', 'table_name', '{}: {}']

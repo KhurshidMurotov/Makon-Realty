@@ -1,0 +1,4 @@
+# file: C:\Users\User\Desktop\real estate parcer\Real-Estate-Scanner\src\real_estate_scanner\db\crud.py
+# hypothesis_version: 6.151.9
+
+['additional_params', 'area_max', 'area_min', 'cities', 'image_url', 'is_active', 'last_batch_at', 'link', 'olx_id', 'pending_ads', 'price', 'price_max', 'price_min', 'region', 'rooms', 'sent_olx_ids', 'started_at', 'timestamp', 'title', 'total_found', 'type', 'username', 'window_end', 'window_start']

@@ -1,0 +1,4 @@
+# file: C:\Users\User\AppData\Roaming\Python\Python312\site-packages\asyncpg\types.py
+# hypothesis_version: 6.151.9
+
+['(', ')', '<Range {}>', 'Attribute', 'Attribute name.', 'BitString', 'Box', 'Circle', 'Database data type.', 'Line', 'LineSegment', 'OID of the type.', 'Path', 'Point', 'Polygon', 'Range', 'ServerVersion', 'Type', '[', ']', '_RV', '_empty', '_lower', '_lower_inc', '_upper', '_upper_inc', 'empty', '{}, {}']
