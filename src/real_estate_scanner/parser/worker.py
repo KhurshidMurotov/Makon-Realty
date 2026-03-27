@@ -148,46 +148,39 @@ async def _send_ad_payload(*, bot: Bot, chat_id: int, ad: ParsedAd, text: str, m
         if len(text) <= MAX_CAPTION:
             full_text = ""
         else:
-            full_text = text[len(short_text):].strip()
+            full_text = text
     else:
         short_text = ""
         full_text = ""
 
     photo_urls = _get_valid_photo_urls(ad)
     if photo_urls:
-        if len(photo_urls) > 10:
-            extra_photo_urls = photo_urls[:-10]
-            final_photo_urls = photo_urls[-10:]
+        primary_photo_url = photo_urls[-1]
+        extra_photo_urls = photo_urls[:-1]
+
+        if extra_photo_urls:
             for start in range(0, len(extra_photo_urls), 10):
                 chunk = extra_photo_urls[start : start + 10]
                 media = [InputMediaPhoto(media=url) for url in chunk]
                 await bot.send_media_group(chat_id=chat_id, media=media)
-        else:
-            final_photo_urls = photo_urls
 
-        media = []
-        for index, url in enumerate(final_photo_urls):
-            if index == 0:
-                media.append(InputMediaPhoto(media=url, caption=short_text))
-            else:
-                media.append(InputMediaPhoto(media=url))
-        await bot.send_media_group(chat_id=chat_id, media=media)
-
-        if full_text and len(full_text) > 30:
-            followup_text = full_text
-        else:
-            followup_text = "Перейти к объявлению"
-
-        await bot.send_message(
+        await bot.send_photo(
             chat_id=chat_id,
-            text=followup_text,
+            photo=primary_photo_url,
+            caption=short_text,
             reply_markup=markup,
         )
+
+        if full_text and len(full_text) > 30:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=full_text,
+            )
         return
 
     await bot.send_message(
         chat_id=chat_id,
-        text=full_text,
+        text=text,
         reply_markup=markup,
     )
 
