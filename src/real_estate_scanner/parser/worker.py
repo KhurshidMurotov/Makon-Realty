@@ -88,6 +88,7 @@ def _build_html_notification(ad: ParsedAd) -> str:
     author = escape(ad.author_name or "\u041d\u0435 \u0443\u043a\u0430\u0437\u0430\u043d")
     owner_type = escape(ad.owner_type or "\u041d\u0435 \u0443\u043a\u0430\u0437\u0430\u043d\u043e")
     created_at = escape(ad.created_at_text or "\u041d\u0435 \u0443\u043a\u0430\u0437\u0430\u043d\u043e")
+    seller_phone = escape(ad.seller_phone) if ad.seller_phone else None
     ad_type_label = escape(_describe_ad_type(ad.ad_type))
 
     return "\n".join(
@@ -103,6 +104,7 @@ def _build_html_notification(ad: ParsedAd) -> str:
             "",
             f"\u041e\u0442: {author}",
             f"\u0421\u043e\u0437\u0434\u0430\u043d\u043e: {created_at}",
+            f"\u0422\u0435\u043b\u0435\u0444\u043e\u043d: {seller_phone}" if seller_phone else "",
             "\u0418\u0441\u0442\u043e\u0447\u043d\u0438\u043a: OLX.uz",
         ]
     )

@@ -53,6 +53,7 @@ class ParsedAd:
     author_name: str | None = None
     owner_type: str | None = None
     created_at_text: str | None = None
+    seller_phone: str | None = None
     published_at: datetime | None = None
 
 
@@ -1230,6 +1231,7 @@ async def fetch_ad_details(url: str) -> dict[str, str | int | None]:
         "author_name": None,
         "owner_type": None,
         "created_at_text": None,
+        "seller_phone": None,
         "published_at": None,
         "district_slug": None,
         "district_label": None,
@@ -1372,6 +1374,52 @@ async def fetch_ad_details(url: str) -> dict[str, str | int | None]:
                             owner_type = _normalize_space(owner_match.group(1))
                             break
 
+                seller_phone = None
+                phone_selectors = (
+                    'a[data-testid="contact-phone"]',
+                    'a[href^="tel:"]',
+                )
+                for selector in phone_selectors:
+                    try:
+                        phone_handle = page.locator(selector).first
+                        if await phone_handle.count():
+                            href = await phone_handle.get_attribute("href")
+                            phone_text = await phone_handle.inner_text(timeout=800)
+                            seller_phone = _normalize_space((href or phone_text or "").replace("tel:", ""))
+                            if seller_phone:
+                                break
+                    except Exception:
+                        continue
+
+                if not seller_phone:
+                    for selector in (
+                        'button[data-testid="show-phone"]',
+                        'button[data-nx-name="Button"]',
+                    ):
+                        try:
+                            button = page.locator(selector).filter(has_text=re.compile("показать", re.IGNORECASE)).first
+                            if await button.count():
+                                await button.click(timeout=1200)
+                                try:
+                                    await page.wait_for_selector('a[data-testid="contact-phone"], a[href^="tel:"]', timeout=3000)
+                                except Exception:
+                                    await page.wait_for_timeout(800)
+                                break
+                        except Exception:
+                            continue
+
+                    for selector in phone_selectors:
+                        try:
+                            phone_handle = page.locator(selector).first
+                            if await phone_handle.count():
+                                href = await phone_handle.get_attribute("href")
+                                phone_text = await phone_handle.inner_text(timeout=800)
+                                seller_phone = _normalize_space((href or phone_text or "").replace("tel:", ""))
+                                if seller_phone:
+                                    break
+                        except Exception:
+                            continue
+
                 page_text = page_text or await page.locator("body").inner_text()
                 created_at_text = None
                 published_at = None
@@ -1400,6 +1448,7 @@ async def fetch_ad_details(url: str) -> dict[str, str | int | None]:
                         "author_name": author_name,
                         "owner_type": owner_type,
                         "created_at_text": created_at_text,
+                        "seller_phone": seller_phone,
                         "published_at": published_at.isoformat() if published_at else None,
                         "district_slug": district_slug,
                         "district_label": district_label,
@@ -1472,6 +1521,7 @@ async def enrich_ad_with_details(ad: ParsedAd) -> ParsedAd:
         author_name=details.get("author_name") or ad.author_name,
         owner_type=details.get("owner_type") or ad.owner_type,
         created_at_text=details.get("created_at_text") or ad.created_at_text,
+        seller_phone=details.get("seller_phone") or ad.seller_phone,
         published_at=published_at or ad.published_at,
         image_url=details.get("image_url") if isinstance(details.get("image_url"), str) and details.get("image_url") else ad.image_url,
         image_urls=list(details.get("image_urls") or ad.image_urls or ([ad.image_url] if ad.image_url else [])),
