@@ -271,8 +271,10 @@ _RE_ROOMS_HONALI = re.compile(r"(?P<rooms>\d+)\s*хонали\b", re.IGNORECASE)
 _RE_ROOMS_XONALI = re.compile(r"(?P<rooms>\d+)\s*xonali\b", re.IGNORECASE)
 _RE_ROOMS_DASH_COMN = re.compile(r"(?P<rooms>\d+)\s*-\s*комн\b", re.IGNORECASE)
 _RE_ROOMS_DASH_X_COMN = re.compile(r"(?P<rooms>\d+)\s*-\s*[хx]\s*комн\b", re.IGNORECASE)
+_RE_ROOMS_DASH_COM = re.compile(r"(?P<rooms>\d+)\s*-\s*ком\b", re.IGNORECASE)
 _RE_ROOMS_KOMNATNAYA = re.compile(r"(?P<rooms>\d+)\s*-\s*комнатн(?:ая|ую|ой)\b", re.IGNORECASE)
 _RE_ROOMS_KOMNATNAYA_NO_DASH = re.compile(r"(?P<rooms>\d+)\s*комнатн(?:ая|ую|ой)\b", re.IGNORECASE)
+_RE_ROOMS_KOMNAT = re.compile(r"(?P<rooms>\d+)\s*комнат[аы]?\b", re.IGNORECASE)
 _RE_ROOMS_COM_YA = re.compile(r"(?P<rooms>\d+)\s*ком-?я\b", re.IGNORECASE)
 _RE_ROOMS_COM_WITH_PUNCT = re.compile(r"(?P<rooms>\d+)\s*[,.]?\s*комн?\b", re.IGNORECASE)
 _RE_ROOMS_XCOM_YA = re.compile(r"(?P<rooms>\d+)\s*[хx]\s*ком-?я\b", re.IGNORECASE)
@@ -296,6 +298,7 @@ _RE_AREA_UNITS = re.compile(r"(?P<area>\d+(?:[.,]\d+)?)\s*sqm\b", re.IGNORECASE)
 _RE_AREA_WORDY = re.compile(r"(?P<area>\d+(?:[.,]\d+)?)\s*квад\w*", re.IGNORECASE)
 _RE_AREA_LAT_WORDY = re.compile(r"(?P<area>\d+(?:[.,]\d+)?)\s*(?:kv|kvm|kvmetr|kv metr)\b", re.IGNORECASE)
 _RE_AREA_INLINE = re.compile(r"(?P<area>\d+(?:[.,]\d+)?)\s*(?:sq\s*m|square\s*meters?)", re.IGNORECASE)
+_RE_AREA_KV_SHORT = re.compile(r"(?P<area>\d+(?:[.,]\d+)?)\s*кв\b", re.IGNORECASE)
 
 
 def _normalize_space(s: str) -> str:
@@ -364,8 +367,10 @@ def _parse_rooms(text: str) -> int | None:
         _RE_ROOMS_SLASH_LAYOUT,
         _RE_ROOMS_DASH_X_COMN,
         _RE_ROOMS_DASH_COMN,
+        _RE_ROOMS_DASH_COM,
         _RE_ROOMS_KOMNATNAYA,
         _RE_ROOMS_KOMNATNAYA_NO_DASH,
+        _RE_ROOMS_KOMNAT,
         _RE_ROOMS_XCOM_YA,
         _RE_ROOMS_COM_YA,
         _RE_ROOMS_COM_WITH_PUNCT,
@@ -409,6 +414,8 @@ def _parse_area(text: str) -> float | None:
         m = _RE_AREA_LAT_WORDY.search(text)
     if not m:
         m = _RE_AREA_INLINE.search(text)
+    if not m:
+        m = _RE_AREA_KV_SHORT.search(text)
     if m:
         raw = m.group("area").replace(",", ".")
         try:
@@ -527,6 +534,92 @@ def _extract_created_at_from_text(text: str) -> tuple[str | None, datetime | Non
                 return abs_match.group(0), None
 
     return None, None
+
+
+def _extract_labeled_room_count(text: str) -> int | None:
+    cleaned = _clean_text_for_parsing(text)
+    patterns = (
+        re.compile(r"(?:колич(?:ество)?\s*комнат|комнаты)\s*[:\-]?\s*(?P<rooms>\d+)", re.IGNORECASE),
+        re.compile(r"(?P<rooms>\d+)\s*кв\b", re.IGNORECASE),
+    )
+    for pattern in patterns:
+        match = pattern.search(cleaned)
+        if not match:
+            continue
+        try:
+            value = int(match.group("rooms"))
+        except ValueError:
+            continue
+        if 1 <= value <= 10:
+            return value
+    return None
+
+
+def _extract_labeled_area(text: str) -> float | None:
+    cleaned = _clean_text_for_parsing(text)
+    patterns = (
+        re.compile(r"(?:общая\s*площадь|площадь)\s*[:\-]?\s*(?P<area>\d+(?:[.,]\d+)?)", re.IGNORECASE),
+        re.compile(r"(?:участок|жил(?:ая)?\s*площадь)\s*[:\-]?\s*(?P<area>\d+(?:[.,]\d+)?)", re.IGNORECASE),
+    )
+    for pattern in patterns:
+        match = pattern.search(cleaned)
+        if not match:
+            continue
+        try:
+            value = float(match.group("area").replace(",", "."))
+        except ValueError:
+            continue
+        if 20 <= value <= 500:
+            return value
+    return None
+
+
+def _extract_labeled_floor_info(text: str) -> tuple[int | None, int | None]:
+    cleaned = _clean_text_for_parsing(text)
+    floor_match = re.search(r"этаж\s*[:\-]?\s*(?P<floor>\d+)", cleaned, re.IGNORECASE)
+    total_match = re.search(r"этажн(?:ость)?\s*[:\-]?\s*(?P<total>\d+)", cleaned, re.IGNORECASE)
+    floor = int(floor_match.group("floor")) if floor_match else None
+    total = int(total_match.group("total")) if total_match else None
+    return floor, total
+
+
+def _extract_parameter_map(text: str) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for raw_line in (text or "").splitlines():
+        line = _normalize_space(raw_line)
+        if not line or ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        key = _normalize_space(key).casefold()
+        value = _normalize_space(value)
+        if key and value:
+            result[key] = value
+    return result
+
+
+def _extract_first_src_from_srcset(srcset: str | None) -> str | None:
+    if not srcset:
+        return None
+    first_item = srcset.split(",")[0].strip()
+    if not first_item:
+        return None
+    return first_item.split(" ")[0].strip() or None
+
+
+def _pick_best_image_url(*candidates: str | None) -> str | None:
+    for candidate in candidates:
+        if not candidate:
+            continue
+        normalized = candidate.strip()
+        if not normalized:
+            continue
+        if "," in normalized and "http" in normalized:
+            normalized = _extract_first_src_from_srcset(normalized) or normalized
+        if normalized.startswith("//"):
+            return f"https:{normalized}"
+        if normalized.startswith("http"):
+            return normalized
+    return None
 
 
 def _extract_ads_from_dom_text(
@@ -812,14 +905,16 @@ async def fetch_ad_details(url: str) -> dict[str, str | int | None]:
         "published_at": None,
         "district_slug": None,
         "district_label": None,
+        "image_url": None,
     }
 
     try:
         async with Stealth().use_async(async_playwright()) as p:
             browser: Browser = await p.chromium.launch(headless=headless)
             page: Page = await browser.new_page()
+            page.set_default_timeout(12000)
 
-            await page.goto(url, wait_until="domcontentloaded")
+            await page.goto(url, wait_until="domcontentloaded", timeout=12000)
             try:
                 await page.wait_for_load_state("networkidle")
             except Exception:
@@ -828,7 +923,93 @@ async def fetch_ad_details(url: str) -> dict[str, str | int | None]:
             await page.wait_for_timeout(1200)
 
             page_text = await page.locator("body").inner_text()
-            parsed_rooms = _parse_rooms(page_text)
+            params_blocks: list[str] = []
+            for selector in (
+                '[data-testid="ad-parameters-container"]',
+                '[data-testid="qa-advert-parameters"]',
+                '[data-cy="ad-parameters"]',
+            ):
+                try:
+                    texts = await page.eval_on_selector_all(
+                        selector,
+                        "(els) => els.map(el => (el.innerText || el.textContent || '').trim()).filter(Boolean)",
+                    )
+                except Exception:
+                    continue
+                params_blocks.extend(_normalize_space(text) for text in texts if _normalize_space(text))
+
+            params_lines: list[str] = []
+            for selector in (
+                '[data-testid="ad-parameters-container"] p[data-nx-name="P3"]',
+                '[data-testid="ad-parameters-container"] p',
+                '[data-testid="ad-parameters-container"] li',
+                '[data-testid="ad-parameters-container"] button',
+                '[data-testid="ad-parameters-container"] div',
+                '[data-testid="qa-advert-parameters"] p',
+                '[data-cy="ad-parameters"] p',
+            ):
+                try:
+                    texts = await page.eval_on_selector_all(
+                        selector,
+                        "(els) => els.map(el => (el.innerText || el.textContent || '').trim()).filter(Boolean)",
+                    )
+                except Exception:
+                    continue
+                params_lines.extend(_normalize_space(text) for text in texts if _normalize_space(text))
+
+            params_text = "\n".join(dict.fromkeys([*params_blocks, *params_lines]))
+            parameter_map = _extract_parameter_map(params_text)
+            try:
+                price_text = await page.locator('[data-testid="ad-price-container"] h3').first.inner_text(timeout=1200)
+            except Exception:
+                price_text = None
+
+            image_url = None
+            for selector in (
+                'img[data-testid="swiper-image"]',
+                '[data-testid="ad-photo"] img',
+                '[data-testid="image-gallery-container"] img',
+                '.swiper-slide-active img',
+                '.swiper img',
+            ):
+                try:
+                    image_candidates = await page.eval_on_selector_all(
+                        selector,
+                        """
+                        (els) => els.map((el) => ({
+                          src: el.getAttribute('src'),
+                          currentSrc: el.currentSrc || null,
+                          srcset: el.getAttribute('srcset'),
+                          dataSrc: el.getAttribute('data-src'),
+                        }))
+                        """,
+                    )
+                except Exception:
+                    continue
+                for item in image_candidates:
+                    image_url = _pick_best_image_url(
+                        item.get("currentSrc"),
+                        item.get("src"),
+                        item.get("dataSrc"),
+                        item.get("srcset"),
+                    )
+                    if image_url:
+                        break
+                if image_url:
+                    break
+
+            parsed_rooms = None
+            if not parsed_rooms:
+                parsed_rooms = _parse_rooms(parameter_map.get("количество комнат", ""))
+            for key in ("Количество комнат", "Комнаты"):
+                parsed_rooms = _parse_rooms(parameter_map.get(key.casefold(), "")) or parsed_rooms
+                if parsed_rooms:
+                    break
+            if not parsed_rooms:
+                parsed_rooms = _extract_labeled_room_count(params_text) or _parse_rooms(params_text)
+            if not parsed_rooms:
+                parsed_rooms = _parse_rooms(page_text) or _extract_labeled_room_count(page_text)
+
             description = None
             for selector in (
                 '[data-cy="ad_description"]',
@@ -870,10 +1051,32 @@ async def fetch_ad_details(url: str) -> dict[str, str | int | None]:
             else:
                 created_at_text, published_at = _extract_created_at_from_text(page_text)
 
-            floor, total_floors = _extract_floor_info(page_text)
-            area = _parse_area(page_text)
-            district_label = _parse_district_label(page_text)
-            district_slug = _map_tashkent_district_label_to_slug(district_label) or _detect_tashkent_district_slug(page_text)
+            floor, total_floors = _extract_floor_info(params_text)
+            labeled_floor, labeled_total_floors = _extract_labeled_floor_info(params_text)
+            if floor is None and total_floors is None:
+                floor, total_floors = _extract_floor_info(page_text)
+                labeled_floor, labeled_total_floors = _extract_labeled_floor_info(page_text)
+            floor = floor or labeled_floor
+            total_floors = total_floors or labeled_total_floors
+            area = _parse_area(params_text) or _extract_labeled_area(params_text)
+            if area is None:
+                area = _parse_area(page_text) or _extract_labeled_area(page_text)
+            if area is None:
+                area = _parse_area(parameter_map.get("общая площадь", "")) or _parse_area(parameter_map.get("жилая площадь", ""))
+            if floor is None and parameter_map.get("этаж"):
+                try:
+                    floor = int(re.search(r"\d+", parameter_map["этаж"]).group(0))
+                except Exception:
+                    pass
+            if total_floors is None and parameter_map.get("этажность дома"):
+                try:
+                    total_floors = int(re.search(r"\d+", parameter_map["этажность дома"]).group(0))
+                except Exception:
+                    pass
+            district_label = _parse_district_label(f"{params_text}\n{page_text}")
+            district_slug = _map_tashkent_district_label_to_slug(district_label) or _detect_tashkent_district_slug(
+                f"{params_text}\n{page_text}\n{description or ''}"
+            )
 
             details.update(
                 {
@@ -887,6 +1090,7 @@ async def fetch_ad_details(url: str) -> dict[str, str | int | None]:
                     "published_at": published_at.isoformat() if published_at else None,
                     "district_slug": district_slug,
                     "district_label": district_label,
+                    "image_url": image_url,
                 }
             )
             await browser.close()
@@ -921,6 +1125,7 @@ async def enrich_ad_with_details(ad: ParsedAd) -> ParsedAd:
         author_name=details.get("author_name"),
         created_at_text=details.get("created_at_text"),
         published_at=published_at or ad.published_at,
+        image_url=details.get("image_url") if isinstance(details.get("image_url"), str) and details.get("image_url") else ad.image_url,
     )
 
 
