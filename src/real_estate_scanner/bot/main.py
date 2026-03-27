@@ -120,18 +120,18 @@ async def start_apartments_handler(message: Message) -> None:
             await message.answer("Запуск отменён: рассылка была остановлена до завершения сбора.")
             return
 
+        await message.answer(
+            f"Квартиры | Продажа | Ташкент\n"
+            f"За последний месяц найдено: {len(filtered_ads)}\n"
+            f"Отправка пойдёт по 1 объявлению каждые {SEND_INTERVAL_SECONDS} секунд, от самого старого к новому."
+        )
+
         await _replace_user_broadcast(
             user_id=user_id,
             total_found=len(filtered_ads),
             pending_ads=_serialize_ads(filtered_ads),
             window_start=window_start,
             window_end=window_end,
-        )
-
-        await message.answer(
-            f"Квартиры | Продажа | Ташкент\n"
-            f"За последний месяц найдено: {len(filtered_ads)}\n"
-            f"Отправка пойдёт по 1 объявлению каждые {SEND_INTERVAL_SECONDS} секунд, от самого старого к новому."
         )
     finally:
         _broadcast_starting_users.discard(user_id)
@@ -168,20 +168,20 @@ async def start_commercial_handler(message: Message) -> None:
             await message.answer("Запуск отменён: рассылка была остановлена до завершения сбора.")
             return
 
-        await _replace_user_broadcast(
-            user_id=user_id,
-            total_found=len(combined_ads),
-            pending_ads=_serialize_ads(combined_ads),
-            window_start=window_start,
-            window_end=window_end,
-        )
-
         await message.answer(
             f"Коммерция | Ташкент\n"
             f"Продажа за месяц: {len(sale_ads)}\n"
             f"Аренда за месяц: {len(rent_ads)}\n"
             f"Всего к отправке: {len(combined_ads)}\n"
             f"Отправка пойдёт по 1 объявлению каждые {SEND_INTERVAL_SECONDS} секунд, от самого старого к новому."
+        )
+
+        await _replace_user_broadcast(
+            user_id=user_id,
+            total_found=len(combined_ads),
+            pending_ads=_serialize_ads(combined_ads),
+            window_start=window_start,
+            window_end=window_end,
         )
     finally:
         _broadcast_starting_users.discard(user_id)

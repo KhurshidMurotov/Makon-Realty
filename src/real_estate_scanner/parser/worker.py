@@ -36,6 +36,7 @@ COMMERCIAL_SALE_URL = "https://www.olx.uz/nedvizhimost/kommercheskie-pomeshcheni
 COMMERCIAL_RENT_URL = "https://www.olx.uz/nedvizhimost/kommercheskie-pomeshcheniya/arenda/tashkent/?currency=UYE"
 SEND_INTERVAL_SECONDS = 10
 MAX_SEND_RETRIES = 3
+MAX_CAPTION = 500
 
 
 def _display_city_name(city_slug: str | None) -> str:
@@ -125,33 +126,68 @@ def clean_text(text: str) -> str:
     return text.strip()
 
 
+def remove_links(text: str) -> str:
+    return re.sub(r"https?://\S+", "", text).strip()
+
+
+def smart_truncate(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    truncated = text[:limit].rstrip()
+    last_space = truncated.rfind(" ")
+    if last_space > max(0, limit - 80):
+        truncated = truncated[:last_space].rstrip()
+    return truncated.rstrip(".,;:!- ") + "..."
+
+
 async def _send_ad_payload(*, bot: Bot, chat_id: int, ad: ParsedAd, text: str, markup: InlineKeyboardMarkup) -> None:
     text = clean_text(text)
+    text = remove_links(text)
+    if text:
+        short_text = smart_truncate(text, MAX_CAPTION)
+        if len(text) <= MAX_CAPTION:
+            full_text = ""
+        else:
+            full_text = text[len(short_text):].strip()
+    else:
+        short_text = ""
+        full_text = ""
+
     photo_urls = _get_valid_photo_urls(ad)
-    if len(photo_urls) > 1:
-        for start in range(0, len(photo_urls), 10):
-            chunk = photo_urls[start : start + 10]
-            media = [InputMediaPhoto(media=url) for url in chunk]
-            await bot.send_media_group(chat_id=chat_id, media=media)
+    if photo_urls:
+        if len(photo_urls) > 10:
+            extra_photo_urls = photo_urls[:-10]
+            final_photo_urls = photo_urls[-10:]
+            for start in range(0, len(extra_photo_urls), 10):
+                chunk = extra_photo_urls[start : start + 10]
+                media = [InputMediaPhoto(media=url) for url in chunk]
+                await bot.send_media_group(chat_id=chat_id, media=media)
+        else:
+            final_photo_urls = photo_urls
+
+        media = []
+        for index, url in enumerate(final_photo_urls):
+            if index == 0:
+                media.append(InputMediaPhoto(media=url, caption=short_text))
+            else:
+                media.append(InputMediaPhoto(media=url))
+        await bot.send_media_group(chat_id=chat_id, media=media)
+
+        if full_text and len(full_text) > 30:
+            followup_text = full_text
+        else:
+            followup_text = "Перейти к объявлению"
+
         await bot.send_message(
             chat_id=chat_id,
-            text=text,
-            reply_markup=markup,
-        )
-        return
-
-    if photo_urls:
-        await bot.send_photo(
-            chat_id=chat_id,
-            photo=photo_urls[0],
-            caption=text,
+            text=followup_text,
             reply_markup=markup,
         )
         return
 
     await bot.send_message(
         chat_id=chat_id,
-        text=text,
+        text=full_text,
         reply_markup=markup,
     )
 
