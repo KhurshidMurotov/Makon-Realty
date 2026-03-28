@@ -37,6 +37,9 @@ COMMERCIAL_RENT_URL = "https://www.olx.uz/nedvizhimost/kommercheskie-pomeshcheni
 SEND_INTERVAL_SECONDS = 10
 MAX_SEND_RETRIES = 3
 MAX_CAPTION = 500
+MAX_BUCKET_PAGE_LIMIT = 100
+SALE_BUCKET_MAX_PRICE = 5_000_000
+COMMERCIAL_RENT_BUCKET_MAX_PRICE = 20_000
 
 
 def _display_city_name(city_slug: str | None) -> str:
@@ -200,6 +203,126 @@ def _set_retry_count(payload: dict, retry_count: int) -> dict:
     return updated
 
 
+def iter_sale_price_buckets() -> list[tuple[int, int]]:
+    buckets: list[tuple[int, int]] = [
+        (0, 40_000),
+        (40_000, 80_000),
+        (80_000, 120_000),
+        (120_000, 150_000),
+    ]
+    current_from = 150_000
+    while current_from < SALE_BUCKET_MAX_PRICE:
+        current_to = min(current_from + 10_000, SALE_BUCKET_MAX_PRICE)
+        buckets.append((current_from, current_to))
+        current_from = current_to
+    return buckets
+
+
+def iter_commercial_rent_price_buckets() -> list[tuple[int, int]]:
+    buckets: list[tuple[int, int]] = [
+        (0, 10),
+        (10, 30),
+        (30, 100),
+        (100, 200),
+        (200, 500),
+        (500, 900),
+        (900, 1400),
+        (1400, 1900),
+    ]
+    current_from = 1900
+    while current_from < COMMERCIAL_RENT_BUCKET_MAX_PRICE:
+        current_to = min(current_from + 500, COMMERCIAL_RENT_BUCKET_MAX_PRICE)
+        buckets.append((current_from, current_to))
+        current_from = current_to
+    return buckets
+
+
+def _dedupe_ads_by_olx_id(ads: list[ParsedAd]) -> list[ParsedAd]:
+    unique: dict[str, ParsedAd] = {}
+    for ad in ads:
+        existing = unique.get(ad.olx_id)
+        if existing is None:
+            unique[ad.olx_id] = ad
+            continue
+        existing_published = existing.published_at or datetime.min.replace(tzinfo=_LOCAL_TZ)
+        current_published = ad.published_at or datetime.min.replace(tzinfo=_LOCAL_TZ)
+        if current_published >= existing_published:
+            unique[ad.olx_id] = ad
+    return list(unique.values())
+
+
+async def _collect_ads_for_price_buckets(
+    *,
+    url: str,
+    ad_type: str,
+    city: str,
+    buckets: list[tuple[int, int]],
+    window_start: datetime,
+    window_end: datetime,
+    per_page_limit: int = 60,
+) -> list[ParsedAd]:
+    collected: list[ParsedAd] = []
+
+    for price_from, price_to in buckets:
+        logger.info(
+            "Collecting OLX bucket: ad_type=%s price_from=%s price_to=%s",
+            ad_type,
+            price_from,
+            price_to,
+        )
+        for page_number in range(1, MAX_BUCKET_PAGE_LIMIT + 1):
+            page_ads = await fetch_ads_from_search(
+                url=url,
+                ad_type=ad_type,
+                city=city,
+                limit=per_page_limit,
+                price_from=price_from,
+                price_to=price_to,
+                page_number=page_number,
+            )
+            if not page_ads:
+                logger.info(
+                    "OLX bucket exhausted: ad_type=%s price_from=%s price_to=%s page=%s",
+                    ad_type,
+                    price_from,
+                    price_to,
+                    page_number,
+                )
+                break
+
+            collected.extend(page_ads)
+
+            has_older_than_window = any(
+                ad.published_at is not None and ad.published_at < window_start
+                for ad in page_ads
+            )
+            if has_older_than_window:
+                logger.info(
+                    "OLX bucket stopped by older ad: ad_type=%s price_from=%s price_to=%s page=%s",
+                    ad_type,
+                    price_from,
+                    price_to,
+                    page_number,
+                )
+                break
+
+    deduped = _dedupe_ads_by_olx_id(collected)
+    filtered = [
+        ad
+        for ad in deduped
+        if ad.published_at is not None and window_start <= ad.published_at <= window_end
+    ]
+    filtered.sort(key=lambda item: item.published_at or window_start)
+    logger.info(
+        "OLX bucket collection finished: ad_type=%s total=%s deduped=%s filtered=%s",
+        ad_type,
+        len(collected),
+        len(deduped),
+        len(filtered),
+    )
+    return filtered
+
+
 async def _send_ad_payload_with_retry(
     *,
     bot: Bot,
@@ -269,26 +392,41 @@ def _deserialize_parsed_ad(payload: dict) -> ParsedAd:
 
 
 async def build_apartments_sale_snapshot(*, limit: int = 200) -> list[ParsedAd]:
-    return await fetch_ads_from_search(
+    window_end = datetime.now(_LOCAL_TZ)
+    window_start = window_end - timedelta(days=30)
+    ads = await _collect_ads_for_price_buckets(
         url=APARTMENTS_SALE_URL,
         ad_type="sale",
         city="tashkent",
-        limit=limit,
+        buckets=iter_sale_price_buckets(),
+        window_start=window_start,
+        window_end=window_end,
+        per_page_limit=min(limit, 60),
     )
+    return ads
 
 
 async def build_commercial_snapshot(*, limit_per_feed: int = 200) -> tuple[list[ParsedAd], list[ParsedAd]]:
-    sale_ads = await fetch_ads_from_search(
+    window_end = datetime.now(_LOCAL_TZ)
+    window_start = window_end - timedelta(days=30)
+
+    sale_ads = await _collect_ads_for_price_buckets(
         url=COMMERCIAL_SALE_URL,
         ad_type="commercial_sale",
         city="tashkent",
-        limit=limit_per_feed,
+        buckets=iter_sale_price_buckets(),
+        window_start=window_start,
+        window_end=window_end,
+        per_page_limit=min(limit_per_feed, 60),
     )
-    rent_ads = await fetch_ads_from_search(
+    rent_ads = await _collect_ads_for_price_buckets(
         url=COMMERCIAL_RENT_URL,
         ad_type="commercial_rent",
         city="tashkent",
-        limit=limit_per_feed,
+        buckets=iter_commercial_rent_price_buckets(),
+        window_start=window_start,
+        window_end=window_end,
+        per_page_limit=min(limit_per_feed, 60),
     )
     return sale_ads, rent_ads
 

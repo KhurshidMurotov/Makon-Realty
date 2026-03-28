@@ -7,7 +7,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import urljoin
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 from zoneinfo import ZoneInfo
 
 from playwright.async_api import Browser, Page, async_playwright
@@ -1080,12 +1080,44 @@ async def _collect_candidate_ads(
     return result
 
 
+def _build_search_page_url(
+    *,
+    base_url: str,
+    page_number: int = 1,
+    price_from: int | None = None,
+    price_to: int | None = None,
+) -> str:
+    parsed = urlparse(base_url)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+
+    if page_number > 1:
+        query["page"] = str(page_number)
+    else:
+        query.pop("page", None)
+
+    if price_from is not None:
+        query["search[filter_float_price:from]"] = str(price_from)
+    else:
+        query.pop("search[filter_float_price:from]", None)
+
+    if price_to is not None:
+        query["search[filter_float_price:to]"] = str(price_to)
+    else:
+        query.pop("search[filter_float_price:to]", None)
+
+    encoded_query = urlencode(query)
+    return urlunparse(parsed._replace(query=encoded_query))
+
+
 async def fetch_ads_from_search(
     *,
     url: str,
     ad_type: str,
     city: str,
     limit: int = 50,
+    price_from: int | None = None,
+    price_to: int | None = None,
+    page_number: int = 1,
 ) -> list[ParsedAd]:
     """
     Асинхронно заходит на OLX страницу поиска и парсит последние карточки.
@@ -1100,6 +1132,13 @@ async def fetch_ads_from_search(
 
     repo_root = Path(__file__).resolve().parents[3]
 
+    target_url = _build_search_page_url(
+        base_url=url,
+        page_number=page_number,
+        price_from=price_from,
+        price_to=price_to,
+    )
+
     try:
         async with Stealth().use_async(async_playwright()) as p:
             browser: Browser | None = None
@@ -1110,8 +1149,14 @@ async def fetch_ads_from_search(
                 context = await browser.new_context()
                 page = await context.new_page()
 
-                logger.info("OLX navigate: %s", url)
-                await page.goto(url, wait_until="domcontentloaded")
+                logger.info(
+                    "OLX navigate: %s (page=%s, price_from=%s, price_to=%s)",
+                    target_url,
+                    page_number,
+                    price_from,
+                    price_to,
+                )
+                await page.goto(target_url, wait_until="domcontentloaded")
                 # Strong waits: OLX is heavily JS-driven; we need deterministic rendering.
                 try:
                     await page.wait_for_load_state("networkidle")
@@ -1135,7 +1180,14 @@ async def fetch_ads_from_search(
                     logger.debug("OLX: page.title() failed")
 
                 candidates = await _collect_candidate_ads(page)
-                logger.info("OLX: candidates=%s for url=%s", len(candidates), url)
+                logger.info(
+                    "OLX: candidates=%s for url=%s (page=%s, price_from=%s, price_to=%s)",
+                    len(candidates),
+                    target_url,
+                    page_number,
+                    price_from,
+                    price_to,
+                )
 
                 if len(candidates) == 0:
                     screenshot_path = str(repo_root / "debug_screenshot.png")
@@ -1213,7 +1265,13 @@ async def fetch_ads_from_search(
                         logger.debug("OLX: browser.close() failed for search url=%s", url)
 
     except Exception:
-        logger.exception("fetch_ads_from_search failed (url=%s)", url)
+        logger.exception(
+            "fetch_ads_from_search failed (url=%s, page=%s, price_from=%s, price_to=%s)",
+            target_url,
+            page_number,
+            price_from,
+            price_to,
+        )
 
     return ads
 
