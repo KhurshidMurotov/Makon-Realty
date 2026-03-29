@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timedelta
 from html import escape
 from zoneinfo import ZoneInfo
@@ -15,14 +15,24 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, InputMedia
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from real_estate_scanner.db.crud import (
+    ad_scanned_within_hours,
+    ad_exists,
+    get_recent_ads_raw,
     get_sale_broadcast_state,
+    get_user_notifications_enabled,
     list_active_sale_broadcast_states,
+    upsert_scanned_ad,
     upsert_sale_broadcast_state,
 )
 from real_estate_scanner.db.init_db import init_db
 from real_estate_scanner.db.models import SaleBroadcastState
 from real_estate_scanner.db.session import AsyncSessionLocal
-from real_estate_scanner.parser.olx_client import ParsedAd, enrich_ad_with_details, fetch_ads_from_search
+from real_estate_scanner.parser.olx_client import (
+    ParsedAd,
+    detect_last_page_for_search,
+    enrich_ad_with_details,
+    fetch_ads_from_search,
+)
 
 logger = logging.getLogger(__name__)
 _LOCAL_TZ = ZoneInfo("Asia/Tashkent")
@@ -34,12 +44,29 @@ STOP_BUTTON = "\u0421\u0442\u043e\u043f"
 APARTMENTS_SALE_URL = "https://www.olx.uz/nedvizhimost/kvartiry/prodazha/tashkent/?currency=UYE"
 COMMERCIAL_SALE_URL = "https://www.olx.uz/nedvizhimost/kommercheskie-pomeshcheniya/prodazha/tashkent/?currency=UYE"
 COMMERCIAL_RENT_URL = "https://www.olx.uz/nedvizhimost/kommercheskie-pomeshcheniya/arenda/tashkent/?currency=UYE"
-SEND_INTERVAL_SECONDS = 10
+SEND_INTERVAL_SECONDS = 1
 MAX_SEND_RETRIES = 3
 MAX_CAPTION = 500
 MAX_BUCKET_PAGE_LIMIT = 100
+KNOWN_BUCKET_STOP_STREAK = 40
 SALE_BUCKET_MAX_PRICE = 5_000_000
 COMMERCIAL_RENT_BUCKET_MAX_PRICE = 20_000
+DEEP_SCAN_START_PAGE = 25
+DEEP_SCAN_WINDOW_PAGES = 1
+DEEP_SCAN_PAGE_DELAY_SECONDS = 3
+is_initial_scan = True
+
+
+def is_initial_scan_active() -> bool:
+    return is_initial_scan
+
+
+def finish_initial_scan() -> None:
+    global is_initial_scan
+    if not is_initial_scan:
+        return
+    is_initial_scan = False
+    logger.info("[SYSTEM] Первый круг завершен. База наполнена. Включаю режим уведомлений.")
 
 
 def _display_city_name(city_slug: str | None) -> str:
@@ -205,16 +232,42 @@ def _set_retry_count(payload: dict, retry_count: int) -> dict:
 
 def iter_sale_price_buckets() -> list[tuple[int, int]]:
     buckets: list[tuple[int, int]] = [
-        (0, 40_000),
-        (40_000, 80_000),
-        (80_000, 120_000),
-        (120_000, 150_000),
+        (0, 20_000),
+        (20_000, 30_000),
+        (30_000, 40_000),
+        (40_000, 44_000),
+        (44_000, 46_000),
+        (46_000, 50_000),
     ]
-    current_from = 150_000
-    while current_from < SALE_BUCKET_MAX_PRICE:
-        current_to = min(current_from + 10_000, SALE_BUCKET_MAX_PRICE)
+    current_from = 50_000
+    while current_from < 150_000:
+        current_to = min(current_from + 1_000, 150_000)
         buckets.append((current_from, current_to))
         current_from = current_to
+    buckets.extend(
+        [
+            (150_000, 154_000),
+            (154_000, 160_000),
+            (160_000, 164_000),
+            (164_000, 170_000),
+            (170_000, 180_000),
+            (180_000, 190_000),
+            (190_000, 200_000),
+        ]
+    )
+    current_from = 200_000
+    while current_from < 300_000:
+        current_to = min(current_from + 10_000, 300_000)
+        buckets.append((current_from, current_to))
+        current_from = current_to
+    buckets.extend(
+        [
+            (300_000, 350_000),
+            (350_000, 400_000),
+            (400_000, 700_000),
+            (700_000, 1_000_000),
+        ]
+    )
     return buckets
 
 
@@ -251,6 +304,25 @@ def _dedupe_ads_by_olx_id(ads: list[ParsedAd]) -> list[ParsedAd]:
     return list(unique.values())
 
 
+def _merge_snapshot_ads(
+    *,
+    cached_ads: list[ParsedAd],
+    fresh_ads: list[ParsedAd],
+    window_start: datetime,
+    window_end: datetime,
+) -> list[ParsedAd]:
+    cached_ads = cached_ads or []
+    fresh_ads = fresh_ads or []
+    merged = _dedupe_ads_by_olx_id([*cached_ads, *fresh_ads])
+    filtered = [
+        ad
+        for ad in merged
+        if ad.published_at is not None and window_start <= ad.published_at <= window_end
+    ]
+    filtered.sort(key=lambda item: item.published_at or window_start)
+    return filtered
+
+
 async def _collect_ads_for_price_buckets(
     *,
     url: str,
@@ -260,67 +332,147 @@ async def _collect_ads_for_price_buckets(
     window_start: datetime,
     window_end: datetime,
     per_page_limit: int = 60,
+    known_olx_ids: set[str] | None = None,
 ) -> list[ParsedAd]:
     collected: list[ParsedAd] = []
+    known_ids = set(known_olx_ids or set())
 
-    for price_from, price_to in buckets:
-        logger.info(
-            "Collecting OLX bucket: ad_type=%s price_from=%s price_to=%s",
-            ad_type,
-            price_from,
-            price_to,
-        )
-        for page_number in range(1, MAX_BUCKET_PAGE_LIMIT + 1):
-            page_ads = await fetch_ads_from_search(
+    async with AsyncSessionLocal() as session:
+        for price_from, price_to in buckets:
+            logger.info(
+                "Collecting OLX bucket: ad_type=%s price_from=%s price_to=%s",
+                ad_type,
+                price_from,
+                price_to,
+            )
+
+            target_page = await detect_last_page_for_search(
                 url=url,
-                ad_type=ad_type,
-                city=city,
-                limit=per_page_limit,
                 price_from=price_from,
                 price_to=price_to,
-                page_number=page_number,
+                max_page=DEEP_SCAN_START_PAGE,
             )
-            if not page_ads:
+
+            if target_page is None:
                 logger.info(
-                    "OLX bucket exhausted: ad_type=%s price_from=%s price_to=%s page=%s",
+                    "OLX bucket skipped by empty first page: ad_type=%s price_from=%s price_to=%s",
+                    ad_type,
+                    price_from,
+                    price_to,
+                )
+                continue
+
+            end_page = max(1, target_page - DEEP_SCAN_WINDOW_PAGES + 1)
+            logger.info(
+                "[SCAN] ? ?????? %s-%s ??????? ????? %s ???????. ???????? ?? ????????? (%s/%s).",
+                price_from,
+                price_to,
+                target_page,
+                target_page,
+                target_page,
+            )
+            logger.info(
+                "[DEEP_SCAN] ??????? ???? ???? ?? 1 ???????? ? ????? (Page %s -> %s) ??? ???? %s-%s.",
+                target_page,
+                end_page,
+                price_from,
+                price_to,
+            )
+
+            for page_number in range(target_page, end_page - 1, -1):
+                page_ads = await fetch_ads_from_search(
+                    url=url,
+                    ad_type=ad_type,
+                    city=city,
+                    limit=per_page_limit,
+                    price_from=price_from,
+                    price_to=price_to,
+                    page_number=page_number,
+                )
+                if not page_ads:
+                    logger.info(
+                        "OLX bucket exhausted: ad_type=%s price_from=%s price_to=%s page=%s",
+                        ad_type,
+                        price_from,
+                        price_to,
+                        page_number,
+                    )
+                    break
+
+                logger.info(
+                    "[SCAN] Найдено %s потенциальных объявлений на странице. ad_type=%s price_from=%s price_to=%s page=%s",
+                    len(page_ads),
                     ad_type,
                     price_from,
                     price_to,
                     page_number,
                 )
-                break
 
-            collected.extend(page_ads)
+                has_older_than_window = False
+                total_on_page = len(page_ads)
+                for index, ad in enumerate(page_ads, start=1):
+                    if ad.olx_id in known_ids:
+                        logger.info("[SKIP] ID %s пропущено, причина: already_in_db", ad.olx_id)
+                        continue
 
-            has_older_than_window = any(
-                ad.published_at is not None and ad.published_at < window_start
-                for ad in page_ads
-            )
-            if has_older_than_window:
-                logger.info(
-                    "OLX bucket stopped by older ad: ad_type=%s price_from=%s price_to=%s page=%s",
-                    ad_type,
-                    price_from,
-                    price_to,
-                    page_number,
-                )
-                break
+                    if await ad_scanned_within_hours(session, ad.olx_id, hours=24):
+                        logger.info("[SKIP] ID %s пропущено, причина: scanned_within_24h", ad.olx_id)
+                        known_ids.add(ad.olx_id)
+                        continue
 
-    deduped = _dedupe_ads_by_olx_id(collected)
-    filtered = [
-        ad
-        for ad in deduped
-        if ad.published_at is not None and window_start <= ad.published_at <= window_end
-    ]
-    filtered.sort(key=lambda item: item.published_at or window_start)
-    logger.info(
-        "OLX bucket collection finished: ad_type=%s total=%s deduped=%s filtered=%s",
-        ad_type,
-        len(collected),
-        len(deduped),
-        len(filtered),
-    )
-    return filtered
+                    if ad.published_at is not None and ad.published_at < window_start:
+                        logger.info("[SKIP] ID %s пропущено, причина: older_than_window", ad.olx_id)
+                        has_older_than_window = True
+                        break
+
+                    logger.info("[PROCESS] Захожу внутрь (%s/%s): %s", index, total_on_page, ad.link)
+                    try:
+                        detailed_ad = await enrich_ad_with_details(ad)
+                    except Exception:
+                        logger.info("[SKIP] ID %s пропущено, причина: enrich_failed", ad.olx_id)
+                        logger.exception("bucket enrich failed (ad_type=%s olx_id=%s)", ad_type, ad.olx_id)
+                        detailed_ad = ad
+
+                    detailed_ad = replace(detailed_ad, details_loaded=True)
+                    logger.info(
+                        "[VALIDATE] %s успешно (Площадь: %s, Комнат: %s, Фото: %s шт).",
+                        detailed_ad.olx_id,
+                        detailed_ad.area,
+                        detailed_ad.rooms,
+                        len(detailed_ad.image_urls or ([detailed_ad.image_url] if detailed_ad.image_url else [])),
+                    )
+                    if not detailed_ad.image_urls and not detailed_ad.image_url:
+                        logger.warning("[LOW_QUALITY] Объявление %s сохранено без фотографий", detailed_ad.olx_id)
+                    collected.append(detailed_ad)
+                    known_ids.add(detailed_ad.olx_id)
+                    await upsert_scanned_ad(
+                        session,
+                        olx_id=detailed_ad.olx_id,
+                        title=detailed_ad.title,
+                        price=detailed_ad.price,
+                        currency="UYE",
+                        published_at=detailed_ad.published_at,
+                        url=detailed_ad.link,
+                        category=detailed_ad.ad_type,
+                        raw_details=_serialize_parsed_ad(detailed_ad),
+                        image_url=detailed_ad.image_url,
+                    )
+                    logger.info("[DB] Успешный Upsert в PostgreSQL для ID %s.", detailed_ad.olx_id)
+                    logger.info("[PERF] ID %s полностью обработан и сохранен.", detailed_ad.olx_id)
+
+                if has_older_than_window:
+                    logger.info(
+                        "OLX bucket stopped by older ad: ad_type=%s price_from=%s price_to=%s page=%s",
+                        ad_type,
+                        price_from,
+                        price_to,
+                        page_number,
+                    )
+                    break
+
+                if page_number > end_page:
+                    await asyncio.sleep(DEEP_SCAN_PAGE_DELAY_SECONDS)
+
 
 
 async def _send_ad_payload_with_retry(
@@ -391,10 +543,31 @@ def _deserialize_parsed_ad(payload: dict) -> ParsedAd:
     return ParsedAd(**payload)
 
 
+def _deserialize_db_parsed_ad(payload: dict) -> ParsedAd:
+    data = dict(payload)
+    published_at = data.get("published_at")
+    if isinstance(published_at, str):
+        try:
+            data["published_at"] = datetime.fromisoformat(published_at)
+        except ValueError:
+            data["published_at"] = None
+    data.setdefault("details_loaded", True)
+    return ParsedAd(**data)
+
+
 async def build_apartments_sale_snapshot(*, limit: int = 200) -> list[ParsedAd]:
     window_end = datetime.now(_LOCAL_TZ)
     window_start = window_end - timedelta(days=30)
-    ads = await _collect_ads_for_price_buckets(
+    async with AsyncSessionLocal() as session:
+        cached_payloads = await get_recent_ads_raw(
+            session,
+            category="sale",
+            window_start=window_start,
+            window_end=window_end,
+        )
+    cached_ads = [_deserialize_db_parsed_ad(payload) for payload in cached_payloads]
+    cached_ids = {ad.olx_id for ad in cached_ads}
+    fresh_ads = await _collect_ads_for_price_buckets(
         url=APARTMENTS_SALE_URL,
         ad_type="sale",
         city="tashkent",
@@ -402,13 +575,36 @@ async def build_apartments_sale_snapshot(*, limit: int = 200) -> list[ParsedAd]:
         window_start=window_start,
         window_end=window_end,
         per_page_limit=min(limit, 60),
+        known_olx_ids=cached_ids,
     )
-    return ads
+    if is_initial_scan:
+        finish_initial_scan()
+    return _merge_snapshot_ads(
+        cached_ads=cached_ads,
+        fresh_ads=fresh_ads,
+        window_start=window_start,
+        window_end=window_end,
+    ) or []
 
 
 async def build_commercial_snapshot(*, limit_per_feed: int = 200) -> tuple[list[ParsedAd], list[ParsedAd]]:
     window_end = datetime.now(_LOCAL_TZ)
     window_start = window_end - timedelta(days=30)
+    async with AsyncSessionLocal() as session:
+        cached_sale_payloads = await get_recent_ads_raw(
+            session,
+            category="commercial_sale",
+            window_start=window_start,
+            window_end=window_end,
+        )
+        cached_rent_payloads = await get_recent_ads_raw(
+            session,
+            category="commercial_rent",
+            window_start=window_start,
+            window_end=window_end,
+        )
+    cached_sale_ads = [_deserialize_db_parsed_ad(payload) for payload in cached_sale_payloads]
+    cached_rent_ads = [_deserialize_db_parsed_ad(payload) for payload in cached_rent_payloads]
 
     sale_ads = await _collect_ads_for_price_buckets(
         url=COMMERCIAL_SALE_URL,
@@ -418,6 +614,7 @@ async def build_commercial_snapshot(*, limit_per_feed: int = 200) -> tuple[list[
         window_start=window_start,
         window_end=window_end,
         per_page_limit=min(limit_per_feed, 60),
+        known_olx_ids={ad.olx_id for ad in cached_sale_ads},
     )
     rent_ads = await _collect_ads_for_price_buckets(
         url=COMMERCIAL_RENT_URL,
@@ -427,8 +624,24 @@ async def build_commercial_snapshot(*, limit_per_feed: int = 200) -> tuple[list[
         window_start=window_start,
         window_end=window_end,
         per_page_limit=min(limit_per_feed, 60),
+        known_olx_ids={ad.olx_id for ad in cached_rent_ads},
     )
-    return sale_ads, rent_ads
+    if is_initial_scan:
+        finish_initial_scan()
+    return (
+        _merge_snapshot_ads(
+            cached_ads=cached_sale_ads,
+            fresh_ads=sale_ads,
+            window_start=window_start,
+            window_end=window_end,
+        ),
+        _merge_snapshot_ads(
+            cached_ads=cached_rent_ads,
+            fresh_ads=rent_ads,
+            window_start=window_start,
+            window_end=window_end,
+        ),
+    )
 
 
 def filter_ads_for_window(
@@ -485,33 +698,76 @@ async def send_broadcast_step(*, bot: Bot, session: AsyncSession, state: SaleBro
         )
         return False
 
+    skipped_existing = False
+    while pending_payloads:
+        candidate_payload = pending_payloads[0]
+        candidate_ad = _deserialize_parsed_ad(candidate_payload)
+        if candidate_ad.details_loaded:
+            break
+        if not await ad_exists(session, candidate_ad.olx_id):
+            break
+        skipped_existing = True
+        logger.info("Skipping cached ad before enrich (user_id=%s, olx_id=%s)", state.user_id, candidate_ad.olx_id)
+        pending_payloads = pending_payloads[1:]
+
+    if skipped_existing:
+        await _persist_state(
+            current_state=state,
+            is_active=bool(pending_payloads),
+            pending_ads=pending_payloads,
+            sent_olx_ids=list(state.sent_olx_ids or []),
+        )
+
+    if not pending_payloads:
+        return False
+
     current_payload = pending_payloads[0]
     rest_payloads = pending_payloads[1:]
     sent_olx_ids = list(state.sent_olx_ids or [])
     retry_count = _get_retry_count(current_payload)
     ad = _deserialize_parsed_ad(current_payload)
 
-    try:
-        detailed_ad = await enrich_ad_with_details(ad)
-    except Exception:
-        logger.exception("broadcast enrich failed (user_id=%s, olx_id=%s)", state.user_id, ad.olx_id)
+    if ad.details_loaded:
         detailed_ad = ad
+    else:
+        try:
+            detailed_ad = await enrich_ad_with_details(ad)
+        except Exception:
+            logger.exception("broadcast enrich failed (user_id=%s, olx_id=%s)", state.user_id, ad.olx_id)
+            detailed_ad = ad
 
     markup = _build_inline_link(detailed_ad)
     text = _build_html_notification(detailed_ad)
     success = False
-    try:
-        await _send_ad_payload_with_retry(
-            bot=bot,
-            chat_id=state.user_id,
-            ad=detailed_ad,
-            text=text,
-            markup=markup,
-        )
+    notifications_enabled = await get_user_notifications_enabled(session, state.user_id)
+    if is_initial_scan or not notifications_enabled:
         success = True
         sent_olx_ids.append(detailed_ad.olx_id)
-    except Exception:
-        logger.exception("broadcast send failed (user_id=%s, olx_id=%s)", state.user_id, detailed_ad.olx_id)
+        if is_initial_scan:
+            logger.info(
+                "Silent initial scan processing (user_id=%s, olx_id=%s)",
+                state.user_id,
+                detailed_ad.olx_id,
+            )
+        else:
+            logger.info(
+                "Notifications disabled; marking processed without send (user_id=%s, olx_id=%s)",
+                state.user_id,
+                detailed_ad.olx_id,
+            )
+    else:
+        try:
+            await _send_ad_payload_with_retry(
+                bot=bot,
+                chat_id=state.user_id,
+                ad=detailed_ad,
+                text=text,
+                markup=markup,
+            )
+            success = True
+            sent_olx_ids.append(detailed_ad.olx_id)
+        except Exception:
+            logger.exception("broadcast send failed (user_id=%s, olx_id=%s)", state.user_id, detailed_ad.olx_id)
 
     latest_state = await get_sale_broadcast_state(session, state.user_id)
     if latest_state is not None and not latest_state.is_active:

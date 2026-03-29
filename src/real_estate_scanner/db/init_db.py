@@ -17,7 +17,34 @@ async def init_db() -> None:
             text("ALTER TABLE ads ADD COLUMN IF NOT EXISTS image_url TEXT")
         )
         await conn.execute(
+            text("ALTER TABLE ads ADD COLUMN IF NOT EXISTS currency VARCHAR(16)")
+        )
+        await conn.execute(
+            text("ALTER TABLE ads ADD COLUMN IF NOT EXISTS published_at TIMESTAMPTZ")
+        )
+        await conn.execute(
+            text("ALTER TABLE ads ADD COLUMN IF NOT EXISTS url TEXT")
+        )
+        await conn.execute(
+            text("ALTER TABLE ads ADD COLUMN IF NOT EXISTS category VARCHAR(64)")
+        )
+        await conn.execute(
+            text("ALTER TABLE ads ADD COLUMN IF NOT EXISTS raw_details JSONB NOT NULL DEFAULT '{}'::jsonb")
+        )
+        await conn.execute(
+            text("ALTER TABLE ads ADD COLUMN IF NOT EXISTS scanned_at TIMESTAMPTZ NOT NULL DEFAULT NOW()")
+        )
+        await conn.execute(
+            text("UPDATE ads SET url = COALESCE(url, link) WHERE url IS NULL")
+        )
+        await conn.execute(
+            text("CREATE UNIQUE INDEX IF NOT EXISTS ux_ads_url ON ads(url)")
+        )
+        await conn.execute(
             text("ALTER TABLE filters ADD COLUMN IF NOT EXISTS cities JSONB NOT NULL DEFAULT '[]'::jsonb")
+        )
+        await conn.execute(
+            text("ALTER TABLE users ADD COLUMN IF NOT EXISTS notifications_enabled BOOLEAN NOT NULL DEFAULT TRUE")
         )
         await conn.execute(
             text(

@@ -4,7 +4,7 @@ import logging
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
@@ -34,6 +34,34 @@ async def upsert_user(session: AsyncSession, user_id: int, username: str | None)
         logger.exception("upsert_user failed (user_id=%s)", user_id)
         await session.rollback()
         raise
+
+
+async def get_user_notifications_enabled(session: AsyncSession, user_id: int) -> bool:
+    stmt = select(User.notifications_enabled).where(User.id == user_id).limit(1)
+    res = await session.execute(stmt)
+    value = res.scalar_one_or_none()
+    return True if value is None else bool(value)
+
+
+async def set_user_notifications_enabled(session: AsyncSession, user_id: int, enabled: bool) -> bool:
+    stmt = (
+        pg_insert(User)
+        .values(id=user_id, notifications_enabled=enabled)
+        .on_conflict_do_update(
+            index_elements=[User.id],
+            set_={"notifications_enabled": enabled},
+        )
+        .returning(User.notifications_enabled)
+    )
+    res = await session.execute(stmt)
+    await session.commit()
+    value = res.scalar_one()
+    return bool(value)
+
+
+async def toggle_user_notifications_enabled(session: AsyncSession, user_id: int) -> bool:
+    current = await get_user_notifications_enabled(session, user_id)
+    return await set_user_notifications_enabled(session, user_id, not current)
 
 
 async def save_filter(session: AsyncSession, user_id: int, filter_data: dict[str, Any]) -> None:
@@ -228,4 +256,102 @@ async def list_active_sale_broadcast_states(session: AsyncSession) -> list[SaleB
     stmt = select(SaleBroadcastState).where(SaleBroadcastState.is_active.is_(True))
     res = await session.execute(stmt)
     return list(res.scalars().all())
+
+
+async def ad_exists(session: AsyncSession, olx_id: str) -> bool:
+    stmt = select(Ad.id).where(Ad.olx_id == olx_id).limit(1)
+    res = await session.execute(stmt)
+    return res.scalar_one_or_none() is not None
+
+
+async def ad_scanned_within_hours(session: AsyncSession, olx_id: str, *, hours: int) -> bool:
+    threshold = func.now() - text(f"INTERVAL '{int(hours)} hours'")
+    stmt = (
+        select(Ad.id)
+        .where(Ad.olx_id == olx_id)
+        .where(Ad.scanned_at >= threshold)
+        .limit(1)
+    )
+    res = await session.execute(stmt)
+    return res.scalar_one_or_none() is not None
+
+
+async def upsert_scanned_ad(
+    session: AsyncSession,
+    *,
+    olx_id: str,
+    title: str,
+    price: int,
+    currency: str | None,
+    published_at,
+    url: str,
+    category: str,
+    raw_details: dict[str, Any],
+    image_url: str | None = None,
+) -> None:
+    stmt = (
+        pg_insert(Ad)
+        .values(
+            olx_id=olx_id,
+            title=title,
+            price=price,
+            currency=currency,
+            published_at=published_at,
+            url=url,
+            category=category,
+            raw_details=raw_details,
+            scanned_at=func.now(),
+            link=url,
+            image_url=image_url,
+        )
+        .on_conflict_do_update(
+            index_elements=[Ad.olx_id],
+            set_={
+                "title": title,
+                "price": price,
+                "currency": currency,
+                "published_at": published_at,
+                "url": url,
+                "category": category,
+                "raw_details": raw_details,
+                "scanned_at": func.now(),
+                "link": url,
+                "image_url": image_url,
+            },
+        )
+    )
+    await session.execute(stmt)
+    await session.commit()
+
+
+async def get_recent_ads_raw(
+    session: AsyncSession,
+    *,
+    category: str,
+    window_start,
+    window_end,
+) -> list[dict[str, Any]]:
+    stmt = (
+        select(Ad)
+        .where(Ad.category == category)
+        .where(Ad.published_at.is_not(None))
+        .where(Ad.published_at >= window_start)
+        .where(Ad.published_at <= window_end)
+        .order_by(Ad.published_at.asc())
+    )
+    res = await session.execute(stmt)
+    rows = list(res.scalars().all())
+    payloads: list[dict[str, Any]] = []
+    for row in rows:
+        payload = dict(row.raw_details or {})
+        payload.setdefault("olx_id", row.olx_id)
+        payload.setdefault("title", row.title)
+        payload.setdefault("price", row.price)
+        payload.setdefault("link", row.url or row.link)
+        payload.setdefault("image_url", row.image_url)
+        payload.setdefault("ad_type", row.category)
+        payload.setdefault("published_at", row.published_at.isoformat() if row.published_at else None)
+        payload.setdefault("details_loaded", True)
+        payloads.append(payload)
+    return payloads
 

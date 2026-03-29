@@ -289,7 +289,7 @@ async def test_conflict_logging(caplog: pytest.LogCaptureFixture, monkeypatch: p
         }
 
     monkeypatch.setattr("real_estate_scanner.parser.olx_client.fetch_ad_details", _fake_fetch)
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.DEBUG):
         enriched = await enrich_ad_with_details(listing_ad)
 
     assert enriched.rooms == 2

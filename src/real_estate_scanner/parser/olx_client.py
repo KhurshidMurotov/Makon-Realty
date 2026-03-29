@@ -55,6 +55,7 @@ class ParsedAd:
     created_at_text: str | None = None
     seller_phone: str | None = None
     published_at: datetime | None = None
+    details_loaded: bool = False
 
 
 _TASHKENT_DISTRICT_SLUGS: list[tuple[str, tuple[str, ...]]] = [
@@ -448,7 +449,7 @@ def _parse_area(text: str) -> float | None:
         raw = m.group("area").replace(",", ".")
         try:
             area = float(raw)
-            if area < 20 or area > 500:
+            if area < 5 or area > 30_000:
                 logger.warning("OLX: area out of bounds parsed=%s raw=%r", area, raw)
                 return None
             return area
@@ -542,7 +543,7 @@ def _extract_labeled_area(text: str) -> float | None:
         if not any(token in key_norm for token in area_tokens):
             continue
         area = _safe_float(value)
-        if area is not None and 20 <= area <= 500:
+        if area is not None and 5 <= area <= 30_000:
             return area
     return None
 
@@ -585,17 +586,17 @@ def _extract_created_at_from_text(text: str) -> tuple[str | None, datetime | Non
     normalized = _normalize_space(text)
     now = datetime.now(_LOCAL_TZ)
 
-    rel_match = re.search(r"\b(Сегодня|Вчера)\s+в\s+(\d{1,2}):(\d{2})", normalized, re.IGNORECASE)
+    rel_match = re.search(r"\b(\u0421\u0435\u0433\u043e\u0434\u043d\u044f|\u0412\u0447\u0435\u0440\u0430)\s+\u0432\s+(\d{1,2}):(\d{2})", normalized, re.IGNORECASE)
     if rel_match:
         day_word = rel_match.group(1).casefold()
         hour = int(rel_match.group(2))
         minute = int(rel_match.group(3))
-        base_date = now.date() if day_word == "сегодня" else (now - timedelta(days=1)).date()
+        base_date = now.date() if day_word == "\u0441\u0435\u0433\u043e\u0434\u043d\u044f" else (now - timedelta(days=1)).date()
         created_at = datetime(base_date.year, base_date.month, base_date.day, hour, minute, tzinfo=_LOCAL_TZ)
         return rel_match.group(0), created_at
 
     abs_match = re.search(
-        r"\b(\d{1,2})\s+([А-Яа-я]+)\s*(\d{4})?\s*(?:г\.?)?(?:\s+в\s+(\d{1,2}):(\d{2}))?",
+        r"\b(\d{1,2})\s+([\u0410-\u042f\u0430-\u044f\u0401\u0451]+)\s*(\d{4})?\s*(?:\u0433\.?)?(?:\s+\u0432\s+(\d{1,2}):(\d{2}))?",
         normalized,
         re.IGNORECASE,
     )
@@ -996,7 +997,11 @@ def _extract_floor_values(
     return floor, total_floors
 
 
-async def _auto_scroll(page: Page, steps: int = 4, delay_ms: int = 600) -> None:
+async def _auto_scroll(page: Page, steps: int = 4, delay_ms: int = 300) -> None:
+    try:
+        await page.locator('[data-testid="ad-photos-container"]').first.scroll_into_view_if_needed(timeout=1500)
+    except Exception:
+        pass
     for _ in range(steps):
         await page.mouse.wheel(0, 2500)
         await page.wait_for_timeout(delay_ms)
@@ -1012,20 +1017,23 @@ async def _collect_candidate_ads(
     берём все ссылки, ведущие на объявления (`/d/obyavlenie/...`),
     и читаем innerText родственного карточного контейнера.
     """
-    async def _extract_with_selector(selector: str) -> list[dict[str, Any]]:
+    async def _extract_from_cards(selector: str) -> list[dict[str, Any]]:
         candidates = await page.eval_on_selector_all(
             selector,
-        """
-        (els) => els
-          .slice(0, 60)
-          .map(el => {
-            const href = el.href || el.getAttribute('href') || '';
-            const card = el.closest('[data-cy="l-card"]') || el.closest('li') || el.closest('article') || el.closest('div') || el.parentElement;
+            """
+        (cards) => cards
+          .slice(0, 80)
+          .map(card => {
+            const linkNode =
+              card?.querySelector('a[href*="/d/obyavlenie/"]') ||
+              card?.querySelector('a[href^="/d/obyavlenie/"]') ||
+              null;
+            const href = linkNode?.href || linkNode?.getAttribute('href') || '';
             const titleNode =
               card?.querySelector('[data-testid="ad-title"]') ||
               card?.querySelector('h3') ||
-              card?.querySelector('a') ||
-              el;
+              linkNode ||
+              card;
 
             const priceNode =
               card?.querySelector('p[data-testid="ad-price"]') ||
@@ -1034,7 +1042,7 @@ async def _collect_candidate_ads(
 
             const title = (titleNode?.innerText || titleNode?.textContent || '').trim();
             const priceText = priceNode ? (priceNode.innerText || priceNode.textContent || '').trim() : null;
-            const text = (card && card.innerText ? card.innerText : (el.innerText || el.textContent || '')).trim();
+            const text = (card && card.innerText ? card.innerText : (card.textContent || '')).trim();
             const params = Array.from(card?.querySelectorAll('p') || [])
               .map(p => (p.innerText || p.textContent || '').trim())
               .filter(Boolean);
@@ -1052,7 +1060,7 @@ async def _collect_candidate_ads(
             const roomsText = roomsNode ? (roomsNode.innerText || roomsNode.textContent || '').trim() : null;
             const areaText = areaNode ? (areaNode.innerText || areaNode.textContent || '').trim() : null;
 
-            const img = (card && card.querySelector('img')) || el.querySelector('img');
+            const img = card?.querySelector('img');
             const imageUrl = img
               ? (img.currentSrc || img.src || img.getAttribute('src') || img.getAttribute('data-src') || null)
               : null;
@@ -1064,20 +1072,82 @@ async def _collect_candidate_ads(
         )
         return list(candidates)
 
-    # 1) Plan A: use known grid/card markers if present.
+    # 1) Plan A: collect listing cards directly so each ad appears once.
     primary_selector = (
-        'div[data-testid="listing-grid"] a[href*="/d/obyavlenie/"], '
-        'a[href*="/d/obyavlenie/"]'
+        '[data-cy="l-card"], '
+        '[data-testid="listing-grid"] > div, '
+        '[data-testid="listing-grid"] > li, '
+        'article[data-testid], '
+        'li[data-testid]'
     )
-    result = await _extract_with_selector(primary_selector)
+    result = await _extract_from_cards(primary_selector)
     if result:
-        return result
+        unique_result: list[dict[str, Any]] = []
+        seen_hrefs: set[str] = set()
+        for item in result:
+            href = (item.get("href") or "").strip()
+            if not href or href in seen_hrefs:
+                continue
+            seen_hrefs.add(href)
+            unique_result.append(item)
+        return unique_result
 
-    # 2) Plan B: if OLX markup differs - take every ad link on the page.
-    logger.warning("OLX: primary selector returned 0 candidates, trying plan B...")
+    # 2) Plan B: if card markup differs, fall back to ad links and dedupe by href.
+    logger.warning("OLX: primary card selector returned 0 candidates, trying link fallback...")
     fallback_selector = 'a[href^="/d/obyavlenie/"], a[href*="/d/obyavlenie/"]'
-    result = await _extract_with_selector(fallback_selector)
-    return result
+    result = await page.eval_on_selector_all(
+        fallback_selector,
+        """
+        (els) => els
+          .slice(0, 100)
+          .map(el => {
+            const href = el.href || el.getAttribute('href') || '';
+            const card = el.closest('[data-cy="l-card"]') || el.closest('li') || el.closest('article') || el.closest('div') || el.parentElement;
+            const titleNode =
+              card?.querySelector('[data-testid="ad-title"]') ||
+              card?.querySelector('h3') ||
+              card?.querySelector('a') ||
+              el;
+            const priceNode =
+              card?.querySelector('p[data-testid="ad-price"]') ||
+              card?.querySelector('[data-testid="ad-price"]') ||
+              null;
+            const title = (titleNode?.innerText || titleNode?.textContent || '').trim();
+            const priceText = priceNode ? (priceNode.innerText || priceNode.textContent || '').trim() : null;
+            const text = (card && card.innerText ? card.innerText : (el.innerText || el.textContent || '')).trim();
+            const params = Array.from(card?.querySelectorAll('p') || [])
+              .map(p => (p.innerText || p.textContent || '').trim())
+              .filter(Boolean);
+            const roomsNode =
+              card?.querySelector('[data-testid*="rooms"]') ||
+              card?.querySelector('[data-testid*="РєРѕРјРЅ"]') ||
+              card?.querySelector('[data-testid*="РєРѕРјРЅР°С‚"]') ||
+              null;
+            const areaNode =
+              card?.querySelector('[data-testid*="m2"]') ||
+              card?.querySelector('[data-testid*="area"]') ||
+              card?.querySelector('[data-testid*="Рј2"]') ||
+              null;
+            const roomsText = roomsNode ? (roomsNode.innerText || roomsNode.textContent || '').trim() : null;
+            const areaText = areaNode ? (areaNode.innerText || areaNode.textContent || '').trim() : null;
+            const img = (card && card.querySelector('img')) || el.querySelector('img');
+            const imageUrl = img
+              ? (img.currentSrc || img.src || img.getAttribute('src') || img.getAttribute('data-src') || null)
+              : null;
+            return { href, title, priceText, text, params, roomsText, areaText, imageUrl };
+          })
+          .filter(x => x.href)
+        """,
+    )
+    unique_result: list[dict[str, Any]] = []
+    seen_hrefs: set[str] = set()
+    for item in result:
+        href = (item.get("href") or "").strip()
+        if not href or href in seen_hrefs:
+            continue
+        seen_hrefs.add(href)
+        unique_result.append(item)
+    return unique_result
 
 
 def _build_search_page_url(
@@ -1107,6 +1177,106 @@ def _build_search_page_url(
 
     encoded_query = urlencode(query)
     return urlunparse(parsed._replace(query=encoded_query))
+
+
+async def detect_last_page_for_search(
+    *,
+    url: str,
+    price_from: int | None = None,
+    price_to: int | None = None,
+    max_page: int = 25,
+) -> int | None:
+    headless_env = os.getenv("OLX_HEADLESS", "true").strip().lower()
+    headless = headless_env in {"1", "true", "yes", "y", "on"}
+
+    target_url = _build_search_page_url(
+        base_url=url,
+        page_number=1,
+        price_from=price_from,
+        price_to=price_to,
+    )
+
+    try:
+        async with Stealth().use_async(async_playwright()) as p:
+            browser: Browser | None = None
+            context = None
+            page: Page | None = None
+            try:
+                browser = await p.chromium.launch(headless=headless)
+                context = await browser.new_context()
+                page = await context.new_page()
+
+                logger.info(
+                    "OLX detect last page: %s (price_from=%s, price_to=%s)",
+                    target_url,
+                    price_from,
+                    price_to,
+                )
+                await page.goto(target_url, wait_until="domcontentloaded")
+                try:
+                    await page.wait_for_load_state("networkidle")
+                except Exception:
+                    logger.debug("OLX: wait_for_load_state(networkidle) failed during last-page detection")
+
+                try:
+                    await page.wait_for_selector(
+                        '[data-testid="pagination-list"], a[href*="/d/obyavlenie/"], div[data-testid="listing-grid"]',
+                        timeout=5000,
+                    )
+                except Exception:
+                    logger.debug("OLX: pagination/listing did not appear quickly during last-page detection")
+
+                no_result = await page.evaluate(
+                    """
+                    () => {
+                      const text = (document.body?.innerText || '').toLowerCase();
+                      return text.includes('объявлений не найдено') ||
+                             text.includes('нічого не знайдено') ||
+                             text.includes('no results') ||
+                             text.includes('ничего не найдено');
+                    }
+                    """
+                )
+                if no_result:
+                    return None
+
+                last_page = await page.eval_on_selector_all(
+                    '[data-testid="pagination-list"] a, [data-testid="pagination-list"] button',
+                    """
+                    (els) => {
+                      const values = els
+                        .map(el => (el.innerText || el.textContent || '').trim())
+                        .map(text => Number(text))
+                        .filter(value => Number.isFinite(value) && value > 0);
+                      return values.length ? Math.max(...values) : 1;
+                    }
+                    """,
+                )
+                return min(int(last_page or 1), max_page)
+            finally:
+                if page is not None:
+                    try:
+                        await page.close()
+                    except Exception:
+                        logger.debug("OLX: page.close() failed during last-page detection")
+                if context is not None:
+                    try:
+                        await context.close()
+                    except Exception:
+                        logger.debug("OLX: context.close() failed during last-page detection")
+                if browser is not None:
+                    try:
+                        await browser.close()
+                    except Exception:
+                        logger.debug("OLX: browser.close() failed during last-page detection")
+    except Exception:
+        logger.exception(
+            "detect_last_page_for_search failed (url=%s, price_from=%s, price_to=%s)",
+            url,
+            price_from,
+            price_to,
+        )
+        return None
 
 
 async def fetch_ads_from_search(
@@ -1276,7 +1446,7 @@ async def fetch_ads_from_search(
     return ads
 
 
-async def fetch_ad_details(url: str) -> dict[str, str | int | None]:
+async def fetch_ad_details(url: str, *, ad_type: str | None = None) -> dict[str, str | int | None]:
     headless_env = os.getenv("OLX_HEADLESS", "true").strip().lower()
     headless = headless_env in {"1", "true", "yes", "y", "on"}
 
@@ -1306,59 +1476,71 @@ async def fetch_ad_details(url: str) -> dict[str, str | int | None]:
                 browser = await p.chromium.launch(headless=headless)
                 context = await browser.new_context()
                 page = await context.new_page()
-                page.set_default_timeout(12000)
+                page.set_default_timeout(8000)
 
-                await page.goto(url, wait_until="domcontentloaded", timeout=12000)
+                await page.goto(url, wait_until="domcontentloaded", timeout=8000)
                 try:
-                    await page.wait_for_load_state("networkidle")
+                    await page.wait_for_load_state("domcontentloaded")
                 except Exception:
-                    logger.debug("OLX details: wait_for_load_state(networkidle) failed for %s", url)
+                    logger.debug("OLX details: wait_for_load_state(domcontentloaded) failed for %s", url)
 
-                await page.wait_for_timeout(1200)
+                try:
+                    await page.wait_for_selector('[data-testid="ad-photos-container"]', timeout=5000)
+                except Exception:
+                    logger.debug("OLX details: ad-photos-container not found quickly for %s", url)
 
                 parameter_map = await _extract_parameters_from_dom(page)
                 params_text = "\n".join(f"{key}: {value}" for key, value in parameter_map.items() if value)
                 page_text: str | None = None
 
-                image_url = None
-                image_urls: list[str] = []
-                for selector in (
-                    'img[data-testid="swiper-image"]',
-                    '[data-testid="ad-photo"] img',
-                    '[data-testid="image-gallery-container"] img',
-                    '.swiper-slide-active img',
-                    '.swiper img',
-                ):
-                    try:
-                        image_candidates = await page.eval_on_selector_all(
-                            selector,
-                            """
-                            (els) => els.map((el) => ({
-                              src: el.getAttribute('src'),
-                              currentSrc: el.currentSrc || null,
-                              srcset: el.getAttribute('srcset'),
-                              dataSrc: el.getAttribute('data-src'),
-                            }))
-                            """,
-                        )
-                    except Exception:
-                        continue
-                    for item in image_candidates:
-                        candidate_url = _pick_best_image_url(
-                            item.get("currentSrc"),
-                            item.get("src"),
-                            item.get("dataSrc"),
-                            item.get("srcset"),
-                        )
-                        if candidate_url and candidate_url not in image_urls:
-                            image_urls.append(candidate_url)
-                    if image_urls:
-                        image_url = image_urls[0]
+                async def _collect_image_urls() -> tuple[str | None, list[str]]:
+                    found_image_url = None
+                    found_image_urls: list[str] = []
+                    for selector in (
+                        'img[data-testid="swiper-image"]',
+                        '[data-testid="ad-photo"] img',
+                        '[data-testid="image-gallery-container"] img',
+                        '.swiper-slide-active img',
+                        '.swiper img',
+                    ):
+                        try:
+                            image_candidates = await page.eval_on_selector_all(
+                                selector,
+                                """
+                                (els) => els.map((el) => ({
+                                  src: el.getAttribute('src'),
+                                  currentSrc: el.currentSrc || null,
+                                  srcset: el.getAttribute('srcset'),
+                                  dataSrc: el.getAttribute('data-src'),
+                                }))
+                                """,
+                            )
+                        except Exception:
+                            continue
+                        for item in image_candidates:
+                            candidate_url = _pick_best_image_url(
+                                item.get("currentSrc"),
+                                item.get("src"),
+                                item.get("dataSrc"),
+                                item.get("srcset"),
+                            )
+                            if candidate_url and candidate_url not in found_image_urls:
+                                found_image_urls.append(candidate_url)
+                        if found_image_urls:
+                            found_image_url = found_image_urls[0]
+                    return found_image_url, found_image_urls
+
+                await _auto_scroll(page)
+                image_url, image_urls = await _collect_image_urls()
+                if not image_urls:
+                    await page.wait_for_timeout(1500)
+                    await _auto_scroll(page, steps=2, delay_ms=300)
+                    image_url, image_urls = await _collect_image_urls()
 
                 parsed_rooms = _extract_rooms_value(
                     params=parameter_map,
                     params_text=params_text,
-                    required="rooms" in REQUIRED_FIELDS,
+                    required=("rooms" in REQUIRED_FIELDS and ad_type not in {"commercial_sale", "commercial_rent"}),
                     url=url,
                 )
                 area = _extract_area_value(
@@ -1370,7 +1552,10 @@ async def fetch_ad_details(url: str) -> dict[str, str | int | None]:
                 floor, total_floors = _extract_floor_values(
                     params=parameter_map,
                     params_text=params_text,
-                    required=("floor" in REQUIRED_FIELDS or "total_floors" in REQUIRED_FIELDS),
+                    required=(
+                        ("floor" in REQUIRED_FIELDS or "total_floors" in REQUIRED_FIELDS)
+                        and ad_type not in {"commercial_sale", "commercial_rent"}
+                    ),
                     url=url,
                 )
 
@@ -1433,50 +1618,6 @@ async def fetch_ad_details(url: str) -> dict[str, str | int | None]:
                             break
 
                 seller_phone = None
-                phone_selectors = (
-                    'a[data-testid="contact-phone"]',
-                    'a[href^="tel:"]',
-                )
-                for selector in phone_selectors:
-                    try:
-                        phone_handle = page.locator(selector).first
-                        if await phone_handle.count():
-                            href = await phone_handle.get_attribute("href")
-                            phone_text = await phone_handle.inner_text(timeout=800)
-                            seller_phone = _normalize_space((href or phone_text or "").replace("tel:", ""))
-                            if seller_phone:
-                                break
-                    except Exception:
-                        continue
-
-                if not seller_phone:
-                    for selector in (
-                        'button[data-testid="show-phone"]',
-                        'button[data-nx-name="Button"]',
-                    ):
-                        try:
-                            button = page.locator(selector).filter(has_text=re.compile("показать", re.IGNORECASE)).first
-                            if await button.count():
-                                await button.click(timeout=1200)
-                                try:
-                                    await page.wait_for_selector('a[data-testid="contact-phone"], a[href^="tel:"]', timeout=3000)
-                                except Exception:
-                                    await page.wait_for_timeout(800)
-                                break
-                        except Exception:
-                            continue
-
-                    for selector in phone_selectors:
-                        try:
-                            phone_handle = page.locator(selector).first
-                            if await phone_handle.count():
-                                href = await phone_handle.get_attribute("href")
-                                phone_text = await phone_handle.inner_text(timeout=800)
-                                seller_phone = _normalize_space((href or phone_text or "").replace("tel:", ""))
-                                if seller_phone:
-                                    break
-                        except Exception:
-                            continue
 
                 page_text = page_text or await page.locator("body").inner_text()
                 created_at_text = None
@@ -1537,7 +1678,10 @@ async def fetch_ad_details(url: str) -> dict[str, str | int | None]:
 
 
 async def enrich_ad_with_details(ad: ParsedAd) -> ParsedAd:
-    details = await fetch_ad_details(ad.link)
+    try:
+        details = await fetch_ad_details(ad.link, ad_type=ad.ad_type)
+    except TypeError:
+        details = await fetch_ad_details(ad.link)
     district_slug = details.get("district_slug")
     district_label = details.get("district_label")
     rooms = details.get("rooms")
@@ -1559,7 +1703,7 @@ async def enrich_ad_with_details(ad: ParsedAd) -> ParsedAd:
         ("total_floors", ad.total_floors, total_floors),
     ):
         if listing_value is not None and detail_value is not None and listing_value != detail_value:
-            logger.warning(
+            logger.debug(
                 "OLX conflict: field=%s listing=%s detail=%s url=%s",
                 field,
                 listing_value,
@@ -1583,6 +1727,7 @@ async def enrich_ad_with_details(ad: ParsedAd) -> ParsedAd:
         published_at=published_at or ad.published_at,
         image_url=details.get("image_url") if isinstance(details.get("image_url"), str) and details.get("image_url") else ad.image_url,
         image_urls=list(details.get("image_urls") or ad.image_urls or ([ad.image_url] if ad.image_url else [])),
+        details_loaded=True,
     )
 
 
