@@ -18,6 +18,12 @@ from real_estate_scanner.config import settings
 
 logger = logging.getLogger(__name__)
 _LOCAL_TZ = ZoneInfo("Asia/Tashkent")
+_DETAIL_PAGE_TIMEOUT_MS = 15_000
+_DETAIL_PAGE_SETTLE_DELAYS_MS = (1_200, 2_400, 3_600)
+_RE_HTML_IMAGE_URL = re.compile(
+    r"https?://[^\"'\s>]+(?:\.jpg|\.jpeg|\.png|\.webp)(?:\?[^\"'\s>]*)?",
+    re.IGNORECASE,
+)
 _RU_MONTHS = {
     "января": 1,
     "февраля": 2,
@@ -668,6 +674,53 @@ def _pick_best_image_url(*candidates: str | None) -> str | None:
     return None
 
 
+def _is_probable_ad_image_url(url: str | None) -> bool:
+    if not url:
+        return False
+    normalized = url.strip().lower()
+    if not normalized.startswith("http"):
+        return False
+    if not any(token in normalized for token in (".jpg", ".jpeg", ".png", ".webp", "olxcdn", "/image;")):
+        return False
+    blocked_tokens = (
+        "logo",
+        "avatar",
+        "icon",
+        "favicon",
+        "sprite",
+        "placeholder",
+        "google",
+        "play.google",
+        "appgallery",
+        "appstore",
+    )
+    return not any(token in normalized for token in blocked_tokens)
+
+
+def _merge_image_urls(*groups: list[str]) -> list[str]:
+    merged: list[str] = []
+    for group in groups:
+        for candidate in group:
+            if not _is_probable_ad_image_url(candidate):
+                continue
+            if candidate not in merged:
+                merged.append(candidate)
+    return merged
+
+
+def _extract_image_urls_from_html(html: str | None) -> list[str]:
+    if not html:
+        return []
+
+    normalized_html = (
+        html.replace("\\/", "/")
+        .replace("\\u002F", "/")
+        .replace("&amp;", "&")
+    )
+    matches = _RE_HTML_IMAGE_URL.findall(normalized_html)
+    return _merge_image_urls(matches)
+
+
 def _first_param_value(params: dict[str, str], *keys: str) -> str | None:
     for key in keys:
         normalized_key = _normalize_space(key).casefold()
@@ -691,14 +744,22 @@ def _extract_parameter_map(text: str | None) -> dict[str, str]:
 
 
 async def _extract_parameters_from_dom(page: Page) -> dict[str, str]:
-    selectors = (
+    leaf_selectors = (
         '[data-testid="ad-parameters-container"] p',
         '[data-testid="qa-advert-parameters"] p',
         '[data-cy="ad-parameters"] p',
+        '[data-testid="ad-parameters-container"] li',
+        '[data-testid="qa-advert-parameters"] li',
+        '[data-cy="ad-parameters"] li',
+    )
+    container_selectors = (
+        '[data-testid="ad-parameters-container"]',
+        '[data-testid="qa-advert-parameters"]',
+        '[data-cy="ad-parameters"]',
     )
 
     lines: list[str] = []
-    for selector in selectors:
+    for selector in leaf_selectors:
         try:
             extracted = await page.eval_on_selector_all(
                 selector,
@@ -711,6 +772,17 @@ async def _extract_parameters_from_dom(page: Page) -> dict[str, str]:
             continue
         if extracted:
             lines.extend(str(item) for item in extracted if str(item).strip())
+
+    if not lines:
+        for selector in container_selectors:
+            try:
+                container_text = await page.locator(selector).first.inner_text(timeout=2000)
+            except Exception:
+                continue
+            for raw_line in container_text.splitlines():
+                line = _normalize_space(raw_line)
+                if line and ":" in line:
+                    lines.append(line)
 
     return _extract_parameter_map("\n".join(lines))
 
@@ -1500,25 +1572,31 @@ async def fetch_ad_details(url: str, *, ad_type: str | None = None) -> dict[str,
                 browser = await p.chromium.launch(headless=headless)
                 context = await browser.new_context()
                 page = await context.new_page()
-                page.set_default_timeout(8000)
+                page.set_default_timeout(_DETAIL_PAGE_TIMEOUT_MS)
 
-                await page.goto(url, wait_until="domcontentloaded", timeout=8000)
+                await page.goto(url, wait_until="domcontentloaded", timeout=_DETAIL_PAGE_TIMEOUT_MS)
                 try:
                     await page.wait_for_load_state("domcontentloaded")
                 except Exception:
                     logger.debug("OLX details: wait_for_load_state(domcontentloaded) failed for %s", url)
 
                 try:
-                    await page.wait_for_selector('[data-testid="ad-photos-container"]', timeout=5000)
+                    await page.wait_for_load_state("networkidle", timeout=7000)
                 except Exception:
-                    logger.debug("OLX details: ad-photos-container not found quickly for %s", url)
+                    logger.debug("OLX details: wait_for_load_state(networkidle) failed for %s", url)
 
-                parameter_map = await _extract_parameters_from_dom(page)
-                params_text = "\n".join(f"{key}: {value}" for key, value in parameter_map.items() if value)
+                try:
+                    await page.wait_for_selector(
+                        '[data-testid="ad-photos-container"], [data-testid="ad-description"], [data-testid="ad-parameters-container"], [data-cy="seller_card"]',
+                        timeout=7000,
+                    )
+                except Exception:
+                    logger.debug("OLX details: primary blocks did not appear quickly for %s", url)
+
                 page_text: str | None = None
+                page_html: str | None = None
 
                 async def _collect_image_urls() -> tuple[str | None, list[str]]:
-                    found_image_url = None
                     found_image_urls: list[str] = []
                     for selector in (
                         'img[data-testid="swiper-image"]',
@@ -1526,6 +1604,7 @@ async def fetch_ad_details(url: str, *, ad_type: str | None = None) -> dict[str,
                         '[data-testid="image-gallery-container"] img',
                         '.swiper-slide-active img',
                         '.swiper img',
+                        'img',
                     ):
                         try:
                             image_candidates = await page.eval_on_selector_all(
@@ -1536,6 +1615,7 @@ async def fetch_ad_details(url: str, *, ad_type: str | None = None) -> dict[str,
                                   currentSrc: el.currentSrc || null,
                                   srcset: el.getAttribute('srcset'),
                                   dataSrc: el.getAttribute('data-src'),
+                                  dataSrcset: el.getAttribute('data-srcset'),
                                 }))
                                 """,
                             )
@@ -1546,20 +1626,76 @@ async def fetch_ad_details(url: str, *, ad_type: str | None = None) -> dict[str,
                                 item.get("currentSrc"),
                                 item.get("src"),
                                 item.get("dataSrc"),
+                                item.get("dataSrcset"),
                                 item.get("srcset"),
                             )
-                            if candidate_url and candidate_url not in found_image_urls:
+                            if _is_probable_ad_image_url(candidate_url) and candidate_url not in found_image_urls:
                                 found_image_urls.append(candidate_url)
-                        if found_image_urls:
-                            found_image_url = found_image_urls[0]
+
+                    try:
+                        meta_candidates = await page.eval_on_selector_all(
+                            'meta[property="og:image"], meta[name="twitter:image"], link[rel="preload"][as="image"]',
+                            """
+                            (els) => els
+                              .map(el => el.getAttribute('content') || el.getAttribute('href'))
+                              .filter(Boolean)
+                            """,
+                        )
+                    except Exception:
+                        meta_candidates = []
+                    found_image_urls = _merge_image_urls(found_image_urls, [str(item) for item in meta_candidates])
+
+                    html = page_html
+                    if html is None:
+                        try:
+                            html = await page.content()
+                        except Exception:
+                            html = None
+                    found_image_urls = _merge_image_urls(found_image_urls, _extract_image_urls_from_html(html))
+                    found_image_url = found_image_urls[0] if found_image_urls else None
                     return found_image_url, found_image_urls
 
-                await _auto_scroll(page)
-                image_url, image_urls = await _collect_image_urls()
-                if not image_urls:
-                    await page.wait_for_timeout(1500)
-                    await _auto_scroll(page, steps=2, delay_ms=300)
-                    image_url, image_urls = await _collect_image_urls()
+                parameter_map: dict[str, str] = {}
+                params_text = ""
+                image_url: str | None = None
+                image_urls: list[str] = []
+
+                for attempt, settle_delay_ms in enumerate(_DETAIL_PAGE_SETTLE_DELAYS_MS, start=1):
+                    await _auto_scroll(page, steps=3 + attempt, delay_ms=350)
+                    await page.wait_for_timeout(settle_delay_ms)
+
+                    candidate_parameter_map = await _extract_parameters_from_dom(page)
+                    if len(candidate_parameter_map) > len(parameter_map):
+                        parameter_map = candidate_parameter_map
+
+                    try:
+                        page_html = await page.content()
+                    except Exception:
+                        page_html = page_html or None
+
+                    candidate_image_url, candidate_image_urls = await _collect_image_urls()
+                    if len(candidate_image_urls) > len(image_urls):
+                        image_url = candidate_image_url
+                        image_urls = candidate_image_urls
+
+                    if parameter_map and len(image_urls) >= 2:
+                        break
+
+                    logger.info(
+                        "OLX details: retry snapshot attempt=%s url=%s params=%s images=%s",
+                        attempt,
+                        url,
+                        len(parameter_map),
+                        len(image_urls),
+                    )
+
+                params_text = "\n".join(f"{key}: {value}" for key, value in parameter_map.items() if value)
+                logger.info(
+                    "OLX details snapshot ready: url=%s params=%s images=%s",
+                    url,
+                    len(parameter_map),
+                    len(image_urls),
+                )
 
                 parsed_rooms = _extract_rooms_value(
                     params=parameter_map,

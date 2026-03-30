@@ -198,7 +198,25 @@ async def _send_ad_payload(*, bot: Bot, chat_id: int, ad: ParsedAd, text: str, m
             for start in range(0, len(photo_urls), 10):
                 chunk = photo_urls[start : start + 10]
                 media = [InputMediaPhoto(media=url) for url in chunk]
-                await bot.send_media_group(chat_id=chat_id, media=media)
+                try:
+                    await bot.send_media_group(chat_id=chat_id, media=media)
+                except TelegramBadRequest:
+                    logger.warning(
+                        "Telegram media_group failed, falling back to single photos: chat_id=%s olx_id=%s chunk_size=%s",
+                        chat_id,
+                        ad.olx_id,
+                        len(chunk),
+                    )
+                    for url in chunk:
+                        try:
+                            await bot.send_photo(chat_id=chat_id, photo=url)
+                        except TelegramBadRequest:
+                            logger.warning(
+                                "Telegram single photo skipped after fallback: chat_id=%s olx_id=%s url=%s",
+                                chat_id,
+                                ad.olx_id,
+                                url,
+                            )
         await bot.send_message(
             chat_id=chat_id,
             text=text,

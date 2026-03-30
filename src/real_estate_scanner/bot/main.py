@@ -11,7 +11,7 @@ import asyncio
 import logging
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
-from aiogram.filters import CommandStart
+from aiogram.filters import Command, CommandStart
 from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup
 
 sys.path.append(str(Path(__file__).resolve().parents[2]))
@@ -407,6 +407,96 @@ async def _set_interval(message: Message, seconds: int) -> None:
         f"Новый интервал отправки: {_format_interval_label(seconds)}.",
         reply_markup=_build_keyboard(),
     )
+
+
+async def _reset_user_history(message: Message) -> None:
+    user_id = message.from_user.id
+    logger.info("reset_handler: from_id=%s", user_id)
+
+    async with AsyncSessionLocal() as session:
+        await upsert_user(session=session, user_id=user_id, username=message.from_user.username)
+        state = await get_sale_broadcast_state(session, user_id)
+
+    if not state:
+        await _persist_broadcast_state(
+            user_id=user_id,
+            is_active=False,
+            pending_ads=[],
+            selected_categories=[],
+            next_category=None,
+            sent_olx_ids=[],
+            send_interval_seconds=DEFAULT_SEND_INTERVAL_SECONDS,
+            total_found=0,
+            started_at=datetime.now(_LOCAL_TZ),
+            window_start=None,
+            window_end=None,
+            last_batch_at=None,
+        )
+        await message.answer(
+            "История рассылки очищена. Теперь можно заново выбрать разделы.",
+            reply_markup=_build_keyboard(),
+        )
+        return
+
+    selected_categories = _normalize_selected_categories(list(state.selected_categories or []))
+    send_interval_seconds = int(
+        getattr(state, "send_interval_seconds", DEFAULT_SEND_INTERVAL_SECONDS) or DEFAULT_SEND_INTERVAL_SECONDS
+    )
+
+    if not selected_categories:
+        await _persist_broadcast_state(
+            user_id=user_id,
+            is_active=False,
+            pending_ads=[],
+            selected_categories=[],
+            next_category=None,
+            sent_olx_ids=[],
+            send_interval_seconds=send_interval_seconds,
+            total_found=0,
+            started_at=datetime.now(_LOCAL_TZ),
+            window_start=None,
+            window_end=None,
+            last_batch_at=None,
+        )
+        await message.answer(
+            "История отправленных объявлений очищена. Активных разделов сейчас нет.",
+            reply_markup=_build_keyboard(),
+        )
+        return
+
+    queue, counts, window_start, window_end, next_category = await _build_queue_for_categories(
+        categories=selected_categories,
+        sent_olx_ids=[],
+        next_category=None,
+    )
+    await _persist_broadcast_state(
+        user_id=user_id,
+        is_active=bool(queue),
+        pending_ads=queue,
+        selected_categories=selected_categories,
+        next_category=next_category,
+        sent_olx_ids=[],
+        send_interval_seconds=send_interval_seconds,
+        total_found=len(queue),
+        started_at=datetime.now(_LOCAL_TZ),
+        window_start=window_start,
+        window_end=window_end,
+        last_batch_at=None,
+    )
+    await message.answer(
+        "История отправленных объявлений очищена. Рассылка начнётся заново с самых старых.\n\n"
+        + _build_status_message(
+            selected_categories=selected_categories,
+            counts=counts,
+            send_interval_seconds=send_interval_seconds,
+        ),
+        reply_markup=_build_keyboard(),
+    )
+
+
+@router.message(Command("reset"))
+async def reset_handler(message: Message) -> None:
+    await _reset_user_history(message)
 
 
 @router.message(CommandStart())
