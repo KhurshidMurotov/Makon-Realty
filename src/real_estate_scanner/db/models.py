@@ -138,10 +138,20 @@ class SaleBroadcastState(Base):
         nullable=False,
         server_default=text("'[]'::jsonb"),
     )
+    selected_categories: Mapped[list[str]] = mapped_column(
+        JSONB,
+        nullable=False,
+        server_default=text("'[]'::jsonb"),
+    )
     sent_olx_ids: Mapped[list[str]] = mapped_column(
         JSONB,
         nullable=False,
         server_default=text("'[]'::jsonb"),
+    )
+    send_interval_seconds: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        server_default=text("30"),
     )
 
     user: Mapped["User"] = relationship(back_populates="sale_broadcast_state")

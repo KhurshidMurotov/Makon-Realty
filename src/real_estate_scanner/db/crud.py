@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import logging
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, func, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
@@ -12,6 +13,12 @@ from sqlalchemy.exc import IntegrityError
 from real_estate_scanner.db.models import Ad, Filter, SaleBroadcastState, User
 
 logger = logging.getLogger(__name__)
+AD_RETENTION_DAYS = 30
+
+
+def get_ad_retention_cutoff(*, now: datetime | None = None) -> datetime:
+    reference = now or datetime.now(timezone.utc)
+    return reference - timedelta(days=AD_RETENTION_DAYS)
 
 
 async def upsert_user(session: AsyncSession, user_id: int, username: str | None) -> None:
@@ -219,7 +226,9 @@ async def upsert_sale_broadcast_state(
     last_batch_at,
     total_found: int,
     pending_ads: list[dict[str, Any]],
+    selected_categories: list[str],
     sent_olx_ids: list[str],
+    send_interval_seconds: int,
 ) -> None:
     stmt = (
         pg_insert(SaleBroadcastState)
@@ -232,7 +241,9 @@ async def upsert_sale_broadcast_state(
             last_batch_at=last_batch_at,
             total_found=total_found,
             pending_ads=pending_ads,
+            selected_categories=selected_categories,
             sent_olx_ids=sent_olx_ids,
+            send_interval_seconds=send_interval_seconds,
         )
         .on_conflict_do_update(
             index_elements=[SaleBroadcastState.user_id],
@@ -244,7 +255,9 @@ async def upsert_sale_broadcast_state(
                 "last_batch_at": last_batch_at,
                 "total_found": total_found,
                 "pending_ads": pending_ads,
+                "selected_categories": selected_categories,
                 "sent_olx_ids": sent_olx_ids,
+                "send_interval_seconds": send_interval_seconds,
             },
         )
     )
@@ -274,6 +287,19 @@ async def ad_scanned_within_hours(session: AsyncSession, olx_id: str, *, hours: 
     )
     res = await session.execute(stmt)
     return res.scalar_one_or_none() is not None
+
+
+async def delete_expired_ads(session: AsyncSession, *, cutoff: datetime | None = None) -> int:
+    retention_cutoff = cutoff or get_ad_retention_cutoff()
+    stmt = delete(Ad).where(
+        or_(
+            Ad.published_at < retention_cutoff,
+            Ad.published_at.is_(None) & (Ad.scanned_at < retention_cutoff),
+        )
+    )
+    result = await session.execute(stmt)
+    await session.commit()
+    return int(result.rowcount or 0)
 
 
 async def upsert_scanned_ad(
@@ -330,6 +356,7 @@ async def get_recent_ads_raw(
     category: str,
     window_start,
     window_end,
+    scanned_since=None,
 ) -> list[dict[str, Any]]:
     stmt = (
         select(Ad)
@@ -339,6 +366,8 @@ async def get_recent_ads_raw(
         .where(Ad.published_at <= window_end)
         .order_by(Ad.published_at.asc())
     )
+    if scanned_since is not None:
+        stmt = stmt.where(Ad.scanned_at >= scanned_since)
     res = await session.execute(stmt)
     rows = list(res.scalars().all())
     payloads: list[dict[str, Any]] = []
@@ -351,7 +380,7 @@ async def get_recent_ads_raw(
         payload.setdefault("image_url", row.image_url)
         payload.setdefault("ad_type", row.category)
         payload.setdefault("published_at", row.published_at.isoformat() if row.published_at else None)
-        payload.setdefault("details_loaded", True)
+        payload.setdefault("details_loaded", False)
         payloads.append(payload)
     return payloads
 

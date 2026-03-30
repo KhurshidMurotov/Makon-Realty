@@ -134,9 +134,17 @@ async def init_db() -> None:
                     last_batch_at TIMESTAMPTZ NULL,
                     total_found BIGINT NOT NULL DEFAULT 0,
                     pending_ads JSONB NOT NULL DEFAULT '[]'::jsonb,
-                    sent_olx_ids JSONB NOT NULL DEFAULT '[]'::jsonb
+                    selected_categories JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    sent_olx_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    send_interval_seconds BIGINT NOT NULL DEFAULT 30
                 )
                 """
             )
+        )
+        await conn.execute(
+            text("ALTER TABLE sale_broadcast_states ADD COLUMN IF NOT EXISTS selected_categories JSONB NOT NULL DEFAULT '[]'::jsonb")
+        )
+        await conn.execute(
+            text("ALTER TABLE sale_broadcast_states ADD COLUMN IF NOT EXISTS send_interval_seconds BIGINT NOT NULL DEFAULT 30")
         )
 

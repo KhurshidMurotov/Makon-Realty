@@ -321,11 +321,28 @@ def _safe_int(value: str | None) -> int | None:
 def _safe_float(value: str | None) -> float | None:
     if not value:
         return None
-    match = re.search(r"\d+(?:[.,]\d+)?", value)
+    match = re.search(r"\d[\d\s\u00A0\u202F]*(?:[.,]\d+)?", value)
     if not match:
         return None
     try:
-        return float(match.group().replace(",", "."))
+        raw = (
+            match.group()
+            .replace("\u00A0", " ")
+            .replace("\u202F", " ")
+            .strip()
+        )
+        if "," in raw and "." in raw:
+            if raw.rfind(",") > raw.rfind("."):
+                normalized = raw.replace(" ", "").replace(".", "").replace(",", ".")
+            else:
+                normalized = raw.replace(" ", "").replace(",", "")
+        elif "," in raw:
+            normalized = raw.replace(" ", "").replace(",", ".")
+        elif "." in raw:
+            normalized = raw.replace(" ", "")
+        else:
+            normalized = raw.replace(" ", "")
+        return float(normalized)
     except ValueError:
         return None
 
@@ -579,6 +596,12 @@ def _extract_labeled_floor_info(text: str) -> tuple[int | None, int | None]:
     return floor, total
 
 
+def _format_absolute_created_at(value: datetime, *, include_time: bool) -> str:
+    if include_time:
+        return value.strftime("%d.%m.%Y %H:%M")
+    return value.strftime("%d.%m.%Y")
+
+
 def _extract_created_at_from_text(text: str) -> tuple[str | None, datetime | None]:
     if not text:
         return None, None
@@ -593,7 +616,7 @@ def _extract_created_at_from_text(text: str) -> tuple[str | None, datetime | Non
         minute = int(rel_match.group(3))
         base_date = now.date() if day_word == "\u0441\u0435\u0433\u043e\u0434\u043d\u044f" else (now - timedelta(days=1)).date()
         created_at = datetime(base_date.year, base_date.month, base_date.day, hour, minute, tzinfo=_LOCAL_TZ)
-        return rel_match.group(0), created_at
+        return _format_absolute_created_at(created_at, include_time=True), created_at
 
     abs_match = re.search(
         r"\b(\d{1,2})\s+([\u0410-\u042f\u0430-\u044f\u0401\u0451]+)\s*(\d{4})?\s*(?:\u0433\.?)?(?:\s+\u0432\s+(\d{1,2}):(\d{2}))?",
@@ -606,11 +629,12 @@ def _extract_created_at_from_text(text: str) -> tuple[str | None, datetime | Non
         month = _RU_MONTHS.get(month_name)
         if month:
             year = int(abs_match.group(3)) if abs_match.group(3) else now.year
+            has_time = bool(abs_match.group(4) and abs_match.group(5))
             hour = int(abs_match.group(4)) if abs_match.group(4) else 0
             minute = int(abs_match.group(5)) if abs_match.group(5) else 0
             try:
                 created_at = datetime(year, month, day, hour, minute, tzinfo=_LOCAL_TZ)
-                return abs_match.group(0), created_at
+                return _format_absolute_created_at(created_at, include_time=has_time), created_at
             except ValueError:
                 return abs_match.group(0), None
 
@@ -1628,8 +1652,9 @@ async def fetch_ad_details(url: str, *, ad_type: str | None = None) -> dict[str,
                     re.IGNORECASE,
                 )
                 if created_match:
-                    created_at_text = _normalize_space(created_match.group(1))
-                    _, published_at = _extract_created_at_from_text(created_at_text)
+                    raw_created_at_text = _normalize_space(created_match.group(1))
+                    created_at_text, published_at = _extract_created_at_from_text(raw_created_at_text)
+                    created_at_text = created_at_text or raw_created_at_text
                 else:
                     created_at_text, published_at = _extract_created_at_from_text(page_text)
 
