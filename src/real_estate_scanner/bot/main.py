@@ -171,16 +171,6 @@ def _format_interval_label(seconds: int) -> str:
     return mapping.get(seconds, f"{seconds} сек.")
 
 
-def _interleave_payloads_by_category(payloads_by_category: dict[str, list[dict]]) -> list[dict]:
-    queues = {category: deque(payloads_by_category.get(category, [])) for category in CATEGORY_ORDER}
-    merged: list[dict] = []
-    while any(queues[category] for category in CATEGORY_ORDER):
-        for category in CATEGORY_ORDER:
-            if queues[category]:
-                merged.append(queues[category].popleft())
-    return merged
-
-
 async def _load_category_payloads(
     *,
     category: str,

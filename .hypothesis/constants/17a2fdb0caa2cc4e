@@ -1,4 +1,0 @@
-# file: C:\Users\User\AppData\Roaming\Python\Python312\site-packages\pydantic_settings\sources\providers\env.py
-# hypothesis_version: 6.151.9
-
-['EnvSettingsSource', 'env_nested_delimiter', 'env_nested_max_split', 'strict']

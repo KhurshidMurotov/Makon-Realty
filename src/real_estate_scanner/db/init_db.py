@@ -44,9 +44,6 @@ async def init_db() -> None:
             text("ALTER TABLE filters ADD COLUMN IF NOT EXISTS cities JSONB NOT NULL DEFAULT '[]'::jsonb")
         )
         await conn.execute(
-            text("ALTER TABLE users ADD COLUMN IF NOT EXISTS notifications_enabled BOOLEAN NOT NULL DEFAULT TRUE")
-        )
-        await conn.execute(
             text("ALTER TABLE users ADD COLUMN IF NOT EXISTS bot_access_allowed BOOLEAN NOT NULL DEFAULT FALSE")
         )
         await conn.execute(

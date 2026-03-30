@@ -101,34 +101,6 @@ async def list_users_for_admin(
     return list(res.scalars().all())
 
 
-async def get_user_notifications_enabled(session: AsyncSession, user_id: int) -> bool:
-    stmt = select(User.notifications_enabled).where(User.id == user_id).limit(1)
-    res = await session.execute(stmt)
-    value = res.scalar_one_or_none()
-    return True if value is None else bool(value)
-
-
-async def set_user_notifications_enabled(session: AsyncSession, user_id: int, enabled: bool) -> bool:
-    stmt = (
-        pg_insert(User)
-        .values(id=user_id, notifications_enabled=enabled)
-        .on_conflict_do_update(
-            index_elements=[User.id],
-            set_={"notifications_enabled": enabled},
-        )
-        .returning(User.notifications_enabled)
-    )
-    res = await session.execute(stmt)
-    await session.commit()
-    value = res.scalar_one()
-    return bool(value)
-
-
-async def toggle_user_notifications_enabled(session: AsyncSession, user_id: int) -> bool:
-    current = await get_user_notifications_enabled(session, user_id)
-    return await set_user_notifications_enabled(session, user_id, not current)
-
-
 async def save_filter(session: AsyncSession, user_id: int, filter_data: dict[str, Any]) -> None:
     """
     Сохраняет фильтр пользователя.
@@ -330,12 +302,6 @@ async def list_active_sale_broadcast_states(session: AsyncSession) -> list[SaleB
     stmt = select(SaleBroadcastState).where(SaleBroadcastState.is_active.is_(True))
     res = await session.execute(stmt)
     return list(res.scalars().all())
-
-
-async def ad_exists(session: AsyncSession, olx_id: str) -> bool:
-    stmt = select(Ad.id).where(Ad.olx_id == olx_id).limit(1)
-    res = await session.execute(stmt)
-    return res.scalar_one_or_none() is not None
 
 
 async def ad_scanned_within_hours(session: AsyncSession, olx_id: str, *, hours: int) -> bool:

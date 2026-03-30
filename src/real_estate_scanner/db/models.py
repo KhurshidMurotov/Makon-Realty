@@ -24,11 +24,6 @@ class User(Base):
     )
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     access_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    notifications_enabled: Mapped[bool] = mapped_column(
-        Boolean,
-        nullable=False,
-        server_default=text("true"),
-    )
 
     filters: Mapped[list["Filter"]] = relationship(
         back_populates="user",

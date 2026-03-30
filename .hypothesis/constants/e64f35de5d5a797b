@@ -1,4 +1,0 @@
-# file: C:\Users\User\AppData\Roaming\Python\Python312\site-packages\asyncpg\cursor.py
-# hypothesis_version: 6.151.9
-
-['MOVE FORWARD {:d} {}', '_args', '_buffer', '_exhausted', '_portal_name', '_prefetch', '_query', '_record_class', '_state', '_timeout', 'asyncpg', 'asyncpg.', 'exhausted', 'portal']

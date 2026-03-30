@@ -1,4 +1,0 @@
-# file: C:\Users\User\AppData\Roaming\Python\Python312\site-packages\playwright\_impl\_str_utils.py
-# hypothesis_version: 6.151.9
-
-['"', '/', '>>', '[.*+?^>${}()|[\\]\\\\]', '\\', '\\"', '\\$&', '\\1\\2\\\\\\3', '\\>\\>', '\\\\', 'i', 'm', 's']

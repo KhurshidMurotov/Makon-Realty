@@ -1,4 +1,0 @@
-# file: C:\Users\User\AppData\Roaming\Python\Python312\site-packages\sqlalchemy\orm\writeonly.py
-# hypothesis_version: 6.151.9
-
-['_T', '_from_obj', '_order_by_clauses', '_where_criteria', 'attr', 'instance', 'write_only']
