@@ -674,6 +674,19 @@ def _pick_best_image_url(*candidates: str | None) -> str | None:
     return None
 
 
+def _image_identity_key(url: str | None) -> str | None:
+    if not url:
+        return None
+    parsed = urlparse(url)
+    path = (parsed.path or "").rstrip("/")
+    if not path:
+        return None
+    tail = path.split("/")[-1]
+    if not tail:
+        return path.lower()
+    return tail.lower()
+
+
 def _is_probable_ad_image_url(url: str | None) -> bool:
     if not url:
         return False
@@ -699,12 +712,16 @@ def _is_probable_ad_image_url(url: str | None) -> bool:
 
 def _merge_image_urls(*groups: list[str]) -> list[str]:
     merged: list[str] = []
+    seen_keys: set[str] = set()
     for group in groups:
         for candidate in group:
             if not _is_probable_ad_image_url(candidate):
                 continue
-            if candidate not in merged:
-                merged.append(candidate)
+            identity = _image_identity_key(candidate) or candidate
+            if identity in seen_keys:
+                continue
+            seen_keys.add(identity)
+            merged.append(candidate)
     return merged
 
 
@@ -806,9 +823,9 @@ def _looks_like_real_gallery_image(
     class_text = (class_name or "").strip().lower()
     if any(token in alt_text for token in ("arrow", "icon")) or any(token in class_text for token in ("arrow", "icon")):
         return False
-    if width is not None and width < 180:
+    if width is not None and width < 300:
         return False
-    if height is not None and height < 140:
+    if height is not None and height < 220:
         return False
     return True
 
@@ -1659,12 +1676,11 @@ async def fetch_ad_details(url: str, *, ad_type: str | None = None) -> dict[str,
                 async def _collect_image_urls() -> tuple[str | None, list[str]]:
                     found_image_urls: list[str] = []
                     for selector in (
-                        'img[data-testid="swiper-image"]',
-                        '[data-testid="ad-photo"] img',
+                        '[data-testid="ad-photos-container"] img',
                         '[data-testid="image-gallery-container"] img',
+                        '[data-testid="ad-photo"] img',
+                        'img[data-testid="swiper-image"]',
                         '.swiper-slide-active img',
-                        '.swiper img',
-                        'img',
                     ):
                         try:
                             image_candidates = await page.eval_on_selector_all(
@@ -1704,26 +1720,28 @@ async def fetch_ad_details(url: str, *, ad_type: str | None = None) -> dict[str,
                             if _is_probable_ad_image_url(candidate_url) and candidate_url not in found_image_urls:
                                 found_image_urls.append(candidate_url)
 
-                    try:
-                        meta_candidates = await page.eval_on_selector_all(
-                            'meta[property="og:image"], meta[name="twitter:image"], link[rel="preload"][as="image"]',
-                            """
-                            (els) => els
-                              .map(el => el.getAttribute('content') || el.getAttribute('href'))
-                              .filter(Boolean)
-                            """,
-                        )
-                    except Exception:
-                        meta_candidates = []
-                    found_image_urls = _merge_image_urls(found_image_urls, [str(item) for item in meta_candidates])
-
-                    html = page_html
-                    if html is None:
+                    if not found_image_urls:
                         try:
-                            html = await page.content()
+                            meta_candidates = await page.eval_on_selector_all(
+                                'meta[property="og:image"], meta[name="twitter:image"], link[rel="preload"][as="image"]',
+                                """
+                                (els) => els
+                                  .map(el => el.getAttribute('content') || el.getAttribute('href'))
+                                  .filter(Boolean)
+                                """,
+                            )
                         except Exception:
-                            html = None
-                    found_image_urls = _merge_image_urls(found_image_urls, _extract_image_urls_from_html(html))
+                            meta_candidates = []
+                        found_image_urls = _merge_image_urls(found_image_urls, [str(item) for item in meta_candidates])
+
+                    if not found_image_urls:
+                        html = page_html
+                        if html is None:
+                            try:
+                                html = await page.content()
+                            except Exception:
+                                html = None
+                        found_image_urls = _merge_image_urls(found_image_urls, _extract_image_urls_from_html(html))
                     found_image_url = found_image_urls[0] if found_image_urls else None
                     return found_image_url, found_image_urls
 
