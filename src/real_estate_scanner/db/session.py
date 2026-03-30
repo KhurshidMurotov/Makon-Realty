@@ -1,12 +1,23 @@
 from __future__ import annotations
 
-import sys
-import asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
 from real_estate_scanner.config import settings
 
+
+def _normalize_database_url(url: str) -> str:
+    normalized = url.strip()
+    if normalized.startswith("postgres://"):
+        normalized = "postgresql://" + normalized[len("postgres://") :]
+    if normalized.startswith("postgresql+asyncpg://"):
+        return normalized
+    if normalized.startswith("postgresql://"):
+        return "postgresql+asyncpg://" + normalized[len("postgresql://") :]
+    return normalized
+
+
 engine = create_async_engine(
-    settings.DATABASE_URL,
+    _normalize_database_url(settings.DATABASE_URL),
     pool_pre_ping=True,
     echo=False,
 )

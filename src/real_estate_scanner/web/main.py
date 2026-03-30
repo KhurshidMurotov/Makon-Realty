@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -235,6 +236,25 @@ def create_app() -> FastAPI:
 app = create_app()
 
 
+def _resolve_web_host() -> str:
+    explicit_host = os.getenv("HOST")
+    if explicit_host:
+        return explicit_host
+    if os.getenv("RAILWAY_ENVIRONMENT"):
+        return "0.0.0.0"
+    return settings.ADMIN_WEB_HOST
+
+
+def _resolve_web_port() -> int:
+    explicit_port = os.getenv("PORT")
+    if explicit_port:
+        try:
+            return int(explicit_port)
+        except ValueError:
+            pass
+    return settings.ADMIN_WEB_PORT
+
+
 def main() -> None:
     import uvicorn
 
@@ -245,8 +265,8 @@ def main() -> None:
 
     uvicorn.run(
         "real_estate_scanner.web.main:app",
-        host=settings.ADMIN_WEB_HOST,
-        port=settings.ADMIN_WEB_PORT,
+        host=_resolve_web_host(),
+        port=_resolve_web_port(),
         reload=False,
     )
 
