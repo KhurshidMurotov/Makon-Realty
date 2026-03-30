@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import re
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta
 from html import escape
+from urllib.parse import urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
 import aiohttp
@@ -44,12 +46,12 @@ COMMERCIAL_SALE_URL = "https://www.olx.uz/nedvizhimost/kommercheskie-pomeshcheni
 COMMERCIAL_RENT_URL = "https://www.olx.uz/nedvizhimost/kommercheskie-pomeshcheniya/arenda/tashkent/?currency=UYE"
 SEND_INTERVAL_SECONDS = 30
 WORKER_POLL_INTERVAL_SECONDS = 5
-SCRAPING_INTERVAL_SECONDS = 40 * 60
+SCRAPING_INTERVAL_SECONDS = 20 * 60
 BROADCAST_RECENT_SEEN_HOURS = 24
 PAGE_SCAN_MAX_PAGE = 25
 PAGE_SCAN_MIN_PAGE = 1
-PAGE_SCAN_DELAY_SECONDS = 4
-FEED_SWITCH_DELAY_SECONDS = 6
+PAGE_SCAN_DELAY_RANGE_SECONDS = (7.5, 10.5)
+FEED_SWITCH_DELAY_RANGE_SECONDS = (11.0, 15.0)
 is_initial_scan = True
 
 
@@ -89,7 +91,28 @@ def _looks_like_photo_url(url: str | None) -> bool:
     if not url:
         return False
     normalized = url.lower()
+    if normalized.startswith("data:"):
+        return False
+    if any(
+        token in normalized
+        for token in (
+            "arrow",
+            "icon",
+            "sprite",
+            "logo",
+            "avatar",
+            "placeholder",
+            "user-no-photo",
+            "no_photo",
+        )
+    ):
+        return False
     return any(token in normalized for token in (".jpg", ".jpeg", ".png", ".webp", "/image;", "/files/"))
+
+
+def _photo_identity(url: str) -> str:
+    parts = urlsplit(url)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
 
 
 def _describe_ad_type(ad_type: str) -> str:
@@ -153,7 +176,17 @@ def _get_valid_photo_urls(ad: ParsedAd) -> list[str]:
     urls = list(ad.image_urls or [])
     if ad.image_url and ad.image_url not in urls:
         urls.insert(0, ad.image_url)
-    return [url for url in urls if _looks_like_photo_url(url)]
+    result: list[str] = []
+    seen: set[str] = set()
+    for url in urls:
+        if not _looks_like_photo_url(url):
+            continue
+        identity = _photo_identity(url)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        result.append(url)
+    return result
 
 
 def _has_meaningful_description(text: str | None) -> bool:
@@ -301,7 +334,7 @@ async def _scan_feed_page(
     )
     if not page_ads:
         logger.info("OLX feed page returned no ads: ad_type=%s page=%s", ad_type, page_number)
-        await asyncio.sleep(PAGE_SCAN_DELAY_SECONDS)
+        await _sleep_scraper_delay(PAGE_SCAN_DELAY_RANGE_SECONDS)
         return collected
 
     logger.info(
@@ -368,7 +401,7 @@ async def _scan_feed_page(
         ad_type,
         page_number,
     )
-    await asyncio.sleep(PAGE_SCAN_DELAY_SECONDS)
+    await _sleep_scraper_delay(PAGE_SCAN_DELAY_RANGE_SECONDS)
     return collected
 
 
@@ -415,7 +448,7 @@ async def _collect_ads_for_feed_pages(
                 )
             )
 
-    await asyncio.sleep(FEED_SWITCH_DELAY_SECONDS)
+    await _sleep_scraper_delay(FEED_SWITCH_DELAY_RANGE_SECONDS)
     return collected
 
 
@@ -502,7 +535,7 @@ async def _run_interleaved_scraper_cycle(*, per_page_limit: int = 60) -> None:
                     known_ids=known_ids_by_feed.setdefault(ad_type, set()),
                 )
                 if index < len(active_feeds):
-                    await asyncio.sleep(FEED_SWITCH_DELAY_SECONDS)
+                    await _sleep_scraper_delay(FEED_SWITCH_DELAY_RANGE_SECONDS)
 
     if is_initial_scan:
         finish_initial_scan()
@@ -715,7 +748,21 @@ async def _refresh_pending_broadcast_queue(
     return refreshed_queue, len(refreshed_queue), next_category
 
 
+def _pick_jittered_delay(delay_range: tuple[float, float]) -> float:
+    low, high = delay_range
+    if high <= low:
+        return low
+    return random.uniform(low, high)
+
+
+async def _sleep_scraper_delay(delay_range: tuple[float, float]) -> None:
+    await asyncio.sleep(_pick_jittered_delay(delay_range))
+
+
 async def send_broadcast_step(*, bot: Bot, session: AsyncSession, state: SaleBroadcastState, force: bool = False) -> bool:
+    latest_state = await get_sale_broadcast_state(session, state.user_id) or state
+    state = latest_state
+
     if not state.is_active:
         return False
 
@@ -824,6 +871,18 @@ async def send_broadcast_step(*, bot: Bot, session: AsyncSession, state: SaleBro
             pending_ads=deferred_payloads,
             sent_olx_ids=sent_olx_ids,
             next_category=next_category,
+        )
+        return False
+
+    live_state = await get_sale_broadcast_state(session, state.user_id) or state
+    live_categories = _normalize_broadcast_categories(list(live_state.selected_categories or []))
+    if not live_state.is_active or detailed_ad.ad_type not in live_categories:
+        logger.info(
+            "Broadcast send skipped by live subscription state: user_id=%s olx_id=%s ad_type=%s live_categories=%s",
+            state.user_id,
+            detailed_ad.olx_id,
+            detailed_ad.ad_type,
+            live_categories,
         )
         return False
 

@@ -743,15 +743,77 @@ def _extract_parameter_map(text: str | None) -> dict[str, str]:
     return result
 
 
-async def _extract_parameters_from_dom(page: Page) -> dict[str, str]:
-    leaf_selectors = (
-        '[data-testid="ad-parameters-container"] p',
-        '[data-testid="qa-advert-parameters"] p',
-        '[data-cy="ad-parameters"] p',
-        '[data-testid="ad-parameters-container"] li',
-        '[data-testid="qa-advert-parameters"] li',
-        '[data-cy="ad-parameters"] li',
+def _looks_like_parameter_key(text: str) -> bool:
+    normalized = _normalize_space(text).casefold()
+    if not normalized or len(normalized) > 48:
+        return False
+    tokens = (
+        "площад",
+        "комнат",
+        "этаж",
+        "этажност",
+        "тип",
+        "сануз",
+        "балкон",
+        "ремонт",
+        "мебел",
+        "состояние",
+        "продав",
+        "район",
+        "расположение",
+        "назначение",
+        "комиссион",
+        "парков",
+        "тип недвижимости",
     )
+    return any(token in normalized for token in tokens)
+
+
+def _extract_parameter_map_from_lines(lines: list[str]) -> dict[str, str]:
+    result = _extract_parameter_map("\n".join(lines))
+    normalized_lines = [_normalize_space(line) for line in lines if _normalize_space(line)]
+    index = 0
+    while index < len(normalized_lines) - 1:
+        key = normalized_lines[index]
+        value = normalized_lines[index + 1]
+        if ":" in key:
+            index += 1
+            continue
+        if ":" not in value and _looks_like_parameter_key(key):
+            result.setdefault(key.casefold(), value)
+            index += 2
+            continue
+        index += 1
+    return result
+
+
+def _looks_like_real_gallery_image(
+    *,
+    url: str | None,
+    width: int | None = None,
+    height: int | None = None,
+    alt: str | None = None,
+    class_name: str | None = None,
+) -> bool:
+    if not url:
+        return False
+    normalized = url.strip().lower()
+    if not normalized.startswith("http"):
+        return False
+    if any(token in normalized for token in ("arrow", "icon", "sprite", "logo", "avatar", "placeholder", ".svg")):
+        return False
+    alt_text = (alt or "").strip().lower()
+    class_text = (class_name or "").strip().lower()
+    if any(token in alt_text for token in ("arrow", "icon")) or any(token in class_text for token in ("arrow", "icon")):
+        return False
+    if width is not None and width < 180:
+        return False
+    if height is not None and height < 140:
+        return False
+    return True
+
+
+async def _extract_parameters_from_dom(page: Page) -> dict[str, str]:
     container_selectors = (
         '[data-testid="ad-parameters-container"]',
         '[data-testid="qa-advert-parameters"]',
@@ -759,13 +821,22 @@ async def _extract_parameters_from_dom(page: Page) -> dict[str, str]:
     )
 
     lines: list[str] = []
-    for selector in leaf_selectors:
+    for selector in container_selectors:
         try:
             extracted = await page.eval_on_selector_all(
                 selector,
-                """(els) => els
-                    .map(el => (el.innerText || el.textContent || '').trim())
-                    .filter(Boolean)
+                """(containers) => containers.flatMap(container => {
+                    const leafTexts = Array.from(
+                      container.querySelectorAll('p, li, dt, dd, span, button, div')
+                    )
+                      .map(el => (el.innerText || el.textContent || '').trim())
+                      .filter(Boolean);
+                    const blockText = (container.innerText || container.textContent || '')
+                      .split(/\\n+/)
+                      .map(item => item.trim())
+                      .filter(Boolean);
+                    return [...leafTexts, ...blockText];
+                  })
                 """,
             )
         except Exception:
@@ -773,18 +844,7 @@ async def _extract_parameters_from_dom(page: Page) -> dict[str, str]:
         if extracted:
             lines.extend(str(item) for item in extracted if str(item).strip())
 
-    if not lines:
-        for selector in container_selectors:
-            try:
-                container_text = await page.locator(selector).first.inner_text(timeout=2000)
-            except Exception:
-                continue
-            for raw_line in container_text.splitlines():
-                line = _normalize_space(raw_line)
-                if line and ":" in line:
-                    lines.append(line)
-
-    return _extract_parameter_map("\n".join(lines))
+    return _extract_parameter_map_from_lines(lines)
 
 
 def extract_field(
@@ -1093,7 +1153,7 @@ def _extract_floor_values(
     return floor, total_floors
 
 
-async def _auto_scroll(page: Page, steps: int = 4, delay_ms: int = 300) -> None:
+async def _auto_scroll(page: Page, steps: int = 5, delay_ms: int = 600) -> None:
     try:
         await page.locator('[data-testid="ad-photos-container"]').first.scroll_into_view_if_needed(timeout=1500)
     except Exception:
@@ -1616,6 +1676,10 @@ async def fetch_ad_details(url: str, *, ad_type: str | None = None) -> dict[str,
                                   srcset: el.getAttribute('srcset'),
                                   dataSrc: el.getAttribute('data-src'),
                                   dataSrcset: el.getAttribute('data-srcset'),
+                                  naturalWidth: el.naturalWidth || null,
+                                  naturalHeight: el.naturalHeight || null,
+                                  alt: el.getAttribute('alt'),
+                                  className: el.getAttribute('class'),
                                 }))
                                 """,
                             )
@@ -1629,6 +1693,14 @@ async def fetch_ad_details(url: str, *, ad_type: str | None = None) -> dict[str,
                                 item.get("dataSrcset"),
                                 item.get("srcset"),
                             )
+                            if not _looks_like_real_gallery_image(
+                                url=candidate_url,
+                                width=item.get("naturalWidth"),
+                                height=item.get("naturalHeight"),
+                                alt=item.get("alt"),
+                                class_name=item.get("className"),
+                            ):
+                                continue
                             if _is_probable_ad_image_url(candidate_url) and candidate_url not in found_image_urls:
                                 found_image_urls.append(candidate_url)
 
@@ -1689,6 +1761,10 @@ async def fetch_ad_details(url: str, *, ad_type: str | None = None) -> dict[str,
                         len(image_urls),
                     )
 
+                page_text = page_text or await page.locator("body").inner_text()
+                body_parameter_map = _extract_parameter_map(page_text)
+                for key, value in body_parameter_map.items():
+                    parameter_map.setdefault(key, value)
                 params_text = "\n".join(f"{key}: {value}" for key, value in parameter_map.items() if value)
                 logger.info(
                     "OLX details snapshot ready: url=%s params=%s images=%s",
@@ -1700,18 +1776,21 @@ async def fetch_ad_details(url: str, *, ad_type: str | None = None) -> dict[str,
                 parsed_rooms = _extract_rooms_value(
                     params=parameter_map,
                     params_text=params_text,
+                    fallback_text=page_text,
                     required=("rooms" in REQUIRED_FIELDS and ad_type not in {"commercial_sale", "commercial_rent"}),
                     url=url,
                 )
                 area = _extract_area_value(
                     params=parameter_map,
                     params_text=params_text,
+                    fallback_text=page_text,
                     required="area" in REQUIRED_FIELDS,
                     url=url,
                 )
                 floor, total_floors = _extract_floor_values(
                     params=parameter_map,
                     params_text=params_text,
+                    fallback_text=page_text,
                     required=(
                         ("floor" in REQUIRED_FIELDS or "total_floors" in REQUIRED_FIELDS)
                         and ad_type not in {"commercial_sale", "commercial_rent"}
