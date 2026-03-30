@@ -103,12 +103,23 @@ async def init_db() -> None:
         await conn.execute(
             text(
                 """
-                UPDATE filters
-                SET cities = CASE
-                    WHEN city IS NULL OR city = '' THEN '[]'::jsonb
-                    ELSE to_jsonb(ARRAY[city])
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_name = 'filters'
+                          AND column_name = 'city'
+                    ) THEN
+                        UPDATE filters
+                        SET cities = CASE
+                            WHEN city IS NULL OR city = '' THEN '[]'::jsonb
+                            ELSE to_jsonb(ARRAY[city])
+                        END
+                        WHERE cities = '[]'::jsonb;
+                    END IF;
                 END
-                WHERE cities = '[]'::jsonb
+                $$;
                 """
             )
         )
