@@ -5,11 +5,12 @@ from collections import deque
 from datetime import datetime, timedelta
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
+from typing import Any, Awaitable, Callable
 from zoneinfo import ZoneInfo
 import asyncio
 import logging
 
-from aiogram import Bot, Dispatcher, F, Router
+from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
 from aiogram.filters import CommandStart
 from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup
 
@@ -18,6 +19,7 @@ sys.path.append(str(Path(__file__).resolve().parents[2]))
 from real_estate_scanner.config import settings
 from real_estate_scanner.db.crud import (
     get_recent_ads_raw,
+    is_user_bot_allowed,
     get_sale_broadcast_state,
     upsert_sale_broadcast_state,
     upsert_user,
@@ -58,6 +60,34 @@ INTERVAL_BUTTONS = {
     INTERVAL_60_BUTTON: 60,
     INTERVAL_120_BUTTON: 120,
 }
+
+ACCESS_DENIED_TEXT = "Доступ к боту пока не выдан. Напишите администратору и попросите добавить ваш Telegram ID в белый список."
+
+
+class BotAccessMiddleware(BaseMiddleware):
+    async def __call__(
+        self,
+        handler: Callable[[Message, dict[str, Any]], Awaitable[Any]],
+        event: Message,
+        data: dict[str, Any],
+    ) -> Any:
+        if not isinstance(event, Message) or event.from_user is None:
+            return await handler(event, data)
+
+        async with AsyncSessionLocal() as session:
+            await upsert_user(
+                session=session,
+                user_id=event.from_user.id,
+                username=event.from_user.username,
+            )
+            if not settings.ADMIN_PANEL_ENABLED:
+                return await handler(event, data)
+
+            if await is_user_bot_allowed(session, event.from_user.id):
+                return await handler(event, data)
+
+        await event.answer(ACCESS_DENIED_TEXT, reply_markup=_build_keyboard())
+        return None
 
 
 def _setup_logging() -> None:
@@ -123,6 +153,15 @@ def _normalize_selected_categories(categories: list[str] | None) -> list[str]:
     return [category for category in CATEGORY_ORDER if category in selected]
 
 
+def _normalize_next_category(next_category: str | None, selected_categories: list[str]) -> str | None:
+    normalized_selected = _normalize_selected_categories(selected_categories)
+    if not normalized_selected:
+        return None
+    if next_category in normalized_selected:
+        return next_category
+    return normalized_selected[0]
+
+
 def _format_interval_label(seconds: int) -> str:
     mapping = {
         30: "30 секунд",
@@ -133,10 +172,7 @@ def _format_interval_label(seconds: int) -> str:
 
 
 def _interleave_payloads_by_category(payloads_by_category: dict[str, list[dict]]) -> list[dict]:
-    queues = {
-        category: deque(payloads_by_category.get(category, []))
-        for category in CATEGORY_ORDER
-    }
+    queues = {category: deque(payloads_by_category.get(category, [])) for category in CATEGORY_ORDER}
     merged: list[dict] = []
     while any(queues[category] for category in CATEGORY_ORDER):
         for category in CATEGORY_ORDER:
@@ -180,7 +216,8 @@ async def _build_queue_for_categories(
     *,
     categories: list[str],
     sent_olx_ids: list[str],
-) -> tuple[list[dict], dict[str, int], datetime, datetime]:
+    next_category: str | None = None,
+) -> tuple[list[dict], dict[str, int], datetime, datetime, str | None]:
     window_end = datetime.now(_LOCAL_TZ)
     window_start = window_end - timedelta(days=30)
     scanned_since = window_end - timedelta(hours=BROADCAST_RECENT_SEEN_HOURS)
@@ -199,8 +236,22 @@ async def _build_queue_for_categories(
         payloads_by_category[category] = payloads
         counts[category] = len(payloads)
 
-    queue = _interleave_payloads_by_category(payloads_by_category)
-    return queue, counts, window_start, window_end
+    selected_categories = _normalize_selected_categories(categories)
+    normalized_next_category = _normalize_next_category(next_category, selected_categories)
+    if normalized_next_category and normalized_next_category in selected_categories:
+        start_index = selected_categories.index(normalized_next_category)
+        ordered_categories = selected_categories[start_index:] + selected_categories[:start_index]
+    else:
+        ordered_categories = selected_categories
+
+    queues = {category: deque(payloads_by_category.get(category, [])) for category in ordered_categories}
+    queue: list[dict] = []
+    while any(queues[category] for category in ordered_categories):
+        for category in ordered_categories:
+            if queues[category]:
+                queue.append(queues[category].popleft())
+
+    return queue, counts, window_start, window_end, normalized_next_category
 
 
 async def _persist_broadcast_state(
@@ -209,6 +260,7 @@ async def _persist_broadcast_state(
     is_active: bool,
     pending_ads: list[dict],
     selected_categories: list[str],
+    next_category: str | None,
     sent_olx_ids: list[str],
     send_interval_seconds: int,
     total_found: int,
@@ -229,6 +281,7 @@ async def _persist_broadcast_state(
             total_found=total_found,
             pending_ads=pending_ads,
             selected_categories=_normalize_selected_categories(selected_categories),
+            next_category=_normalize_next_category(next_category, selected_categories),
             sent_olx_ids=sent_olx_ids,
             send_interval_seconds=send_interval_seconds,
         )
@@ -264,6 +317,7 @@ async def _toggle_category_subscription(message: Message, category: str) -> None
             state = await get_sale_broadcast_state(session, user_id)
 
         selected_categories = _normalize_selected_categories(list(state.selected_categories or []) if state else [])
+        next_category = _normalize_next_category(getattr(state, "next_category", None), selected_categories)
         sent_olx_ids = list(state.sent_olx_ids or []) if state else []
         send_interval_seconds = int(getattr(state, "send_interval_seconds", DEFAULT_SEND_INTERVAL_SECONDS) or DEFAULT_SEND_INTERVAL_SECONDS)
 
@@ -281,6 +335,7 @@ async def _toggle_category_subscription(message: Message, category: str) -> None
                 is_active=False,
                 pending_ads=[],
                 selected_categories=[],
+                next_category=None,
                 sent_olx_ids=sent_olx_ids,
                 send_interval_seconds=send_interval_seconds,
                 total_found=0,
@@ -292,15 +347,17 @@ async def _toggle_category_subscription(message: Message, category: str) -> None
             await message.answer("Все разделы отключены.", reply_markup=_build_keyboard())
             return
 
-        queue, counts, window_start, window_end = await _build_queue_for_categories(
+        queue, counts, window_start, window_end, next_category = await _build_queue_for_categories(
             categories=selected_categories,
             sent_olx_ids=sent_olx_ids,
+            next_category=next_category,
         )
         await _persist_broadcast_state(
             user_id=user_id,
             is_active=bool(queue),
             pending_ads=queue,
             selected_categories=selected_categories,
+            next_category=next_category,
             sent_olx_ids=sent_olx_ids,
             send_interval_seconds=send_interval_seconds,
             total_found=len(queue),
@@ -333,6 +390,7 @@ async def _set_interval(message: Message, seconds: int) -> None:
 
     selected_categories = _normalize_selected_categories(list(state.selected_categories or []) if state else [])
     pending_ads = list(state.pending_ads or []) if state else []
+    next_category = _normalize_next_category(getattr(state, "next_category", None), selected_categories)
     sent_olx_ids = list(state.sent_olx_ids or []) if state else []
     is_active = bool(state.is_active) if state else False
     total_found = int(state.total_found or len(pending_ads)) if state else len(pending_ads)
@@ -346,6 +404,7 @@ async def _set_interval(message: Message, seconds: int) -> None:
         is_active=is_active,
         pending_ads=pending_ads,
         selected_categories=selected_categories,
+        next_category=next_category,
         sent_olx_ids=sent_olx_ids,
         send_interval_seconds=seconds,
         total_found=total_found,
@@ -413,6 +472,7 @@ async def stop_broadcast_handler(message: Message) -> None:
             is_active=False,
             pending_ads=list(state.pending_ads or []),
             selected_categories=selected_categories,
+            next_category=_normalize_next_category(getattr(state, "next_category", None), selected_categories),
             sent_olx_ids=sent_olx_ids,
             send_interval_seconds=send_interval_seconds,
             total_found=int(state.total_found or len(state.pending_ads or [])),
@@ -424,15 +484,17 @@ async def stop_broadcast_handler(message: Message) -> None:
         await message.answer("Рассылка поставлена на паузу.", reply_markup=_build_keyboard())
         return
 
-    queue, counts, window_start, window_end = await _build_queue_for_categories(
+    queue, counts, window_start, window_end, next_category = await _build_queue_for_categories(
         categories=selected_categories,
         sent_olx_ids=sent_olx_ids,
+        next_category=getattr(state, "next_category", None),
     )
     await _persist_broadcast_state(
         user_id=user_id,
         is_active=bool(queue),
         pending_ads=queue,
         selected_categories=selected_categories,
+        next_category=next_category,
         sent_olx_ids=sent_olx_ids,
         send_interval_seconds=send_interval_seconds,
         total_found=len(queue),
@@ -467,6 +529,7 @@ async def main() -> None:
 
     bot = Bot(token=settings.BOT_TOKEN)
     dp = Dispatcher()
+    dp.message.middleware(BotAccessMiddleware())
     dp.include_router(router)
 
     worker_task = asyncio.create_task(run_worker(bot))

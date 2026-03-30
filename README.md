@@ -29,3 +29,19 @@ Run tests:
 Из корня проекта:
 - `python -m real_estate_scanner.bot.main`
 
+## Run admin panel
+
+1. Заполните в `.env`:
+   - `ADMIN_PANEL_ENABLED=true`
+   - `ADMIN_USERNAME=...`
+   - `ADMIN_PASSWORD=...`
+   - `ADMIN_SESSION_SECRET=...`
+   - `ADMIN_WEB_HOST=127.0.0.1`
+   - `ADMIN_WEB_PORT=8000`
+
+2. Запустите:
+   - `python -m real_estate_scanner.web.main`
+
+3. Откройте:
+   - `http://127.0.0.1:8000/login`
+

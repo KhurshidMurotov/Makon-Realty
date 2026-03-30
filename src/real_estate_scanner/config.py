@@ -17,6 +17,14 @@ class Settings(BaseSettings):
     # Telegram bot token (used in later modules)
     BOT_TOKEN: str | None = None
 
+    # Admin panel settings
+    ADMIN_PANEL_ENABLED: bool = False
+    ADMIN_USERNAME: str | None = None
+    ADMIN_PASSWORD: str | None = None
+    ADMIN_SESSION_SECRET: str | None = None
+    ADMIN_WEB_HOST: str = "127.0.0.1"
+    ADMIN_WEB_PORT: int = 8000
+
     # Used in later modules for URL building
     OLX_BASE_URL: str = "https://www.olx.uz"
 

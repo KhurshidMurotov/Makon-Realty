@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+
+{% block body %}
+<div class="page">
+  <div class="card">
+    <div class="row" style="margin-bottom:18px;">
+      <div>
+        <h1 style="margin-bottom:4px;">Доступ к Telegram-боту</h1>
+        <div class="muted">Пользователь появится здесь после первого сообщения боту.</div>
+      </div>
+      <div class="spacer"></div>
+      <form method="post" action="/logout">
+        <button class="btn btn-outline" type="submit">Выйти</button>
+      </form>
+    </div>
+
+    {% if message %}
+      <div class="flash">{{ message }}</div>
+    {% endif %}
+
+    <form method="get" action="/admin/users" class="filters">
+      <div class="row">
+        <div style="flex:1 1 280px;">
+          <input type="text" name="search" value="{{ search }}" placeholder="Поиск по Telegram user_id или username">
+        </div>
+        <div>
+          <select name="allowed" style="padding:12px 14px;border:1px solid var(--line);border-radius:12px;">
+            <option value="all" {% if allowed_filter == "all" %}selected{% endif %}>Все</option>
+            <option value="allowed" {% if allowed_filter == "allowed" %}selected{% endif %}>Только разрешённые</option>
+            <option value="denied" {% if allowed_filter == "denied" %}selected{% endif %}>Только без доступа</option>
+          </select>
+        </div>
+        <div>
+          <button class="btn btn-primary" type="submit">Показать</button>
+        </div>
+      </div>
+    </form>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Telegram user_id</th>
+          <th>Username</th>
+          <th>Статус</th>
+          <th>Последняя активность</th>
+          <th>Обновление доступа</th>
+          <th>Действие</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for user in users %}
+          <tr>
+            <td>{{ user.id }}</td>
+            <td>{{ user.username or "—" }}</td>
+            <td>
+              {% if user.bot_access_allowed %}
+                <span class="tag tag-ok">Есть доступ</span>
+              {% else %}
+                <span class="tag tag-no">Нет доступа</span>
+              {% endif %}
+            </td>
+            <td>{{ user.last_seen_at|datetime }}</td>
+            <td>{{ user.access_updated_at|datetime }}</td>
+            <td>
+              <div class="row" style="gap:8px;flex-wrap:wrap;">
+                {% if user.bot_access_allowed %}
+                  <form method="post" action="/admin/users/{{ user.id }}/deny" class="row">
+                    <input type="hidden" name="search" value="{{ search }}">
+                    <input type="hidden" name="allowed" value="{{ allowed_filter }}">
+                    <button class="btn btn-danger" type="submit">Запретить</button>
+                  </form>
+                {% else %}
+                  <form method="post" action="/admin/users/{{ user.id }}/allow" class="row">
+                    <input type="hidden" name="search" value="{{ search }}">
+                    <input type="hidden" name="allowed" value="{{ allowed_filter }}">
+                    <button class="btn btn-success" type="submit">Разрешить</button>
+                  </form>
+                {% endif %}
+                <form method="post" action="/admin/users/{{ user.id }}/delete" class="row" onsubmit="return confirm('Удалить пользователя {{ user.id }}?');">
+                  <input type="hidden" name="search" value="{{ search }}">
+                  <input type="hidden" name="allowed" value="{{ allowed_filter }}">
+                  <button class="btn btn-outline" type="submit">Удалить</button>
+                </form>
+              </div>
+            </td>
+          </tr>
+        {% else %}
+          <tr>
+            <td colspan="6" class="muted">Пользователи пока не найдены.</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

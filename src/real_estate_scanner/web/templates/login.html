@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+
+{% block body %}
+<div class="login-wrap">
+  <div class="card login-card">
+    <h1>Вход в админ-панель</h1>
+    <p class="muted">Разрешение на использование Telegram-бота выдаётся отсюда вручную по Telegram user_id.</p>
+
+    {% if error %}
+      <div class="error">{{ error }}</div>
+    {% endif %}
+
+    {% if not admin_panel_enabled %}
+      <div class="error">Админ-панель отключена в .env.</div>
+    {% else %}
+      <form method="post" action="/login">
+        <div style="margin-bottom:12px;">
+          <label for="username">Логин</label>
+          <input id="username" name="username" type="text" autocomplete="username" required>
+        </div>
+        <div style="margin-bottom:16px;">
+          <label for="password">Пароль</label>
+          <input id="password" name="password" type="password" autocomplete="current-password" required>
+        </div>
+        <button class="btn btn-primary" type="submit">Войти</button>
+      </form>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

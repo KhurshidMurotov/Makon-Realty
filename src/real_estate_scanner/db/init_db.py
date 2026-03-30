@@ -47,6 +47,15 @@ async def init_db() -> None:
             text("ALTER TABLE users ADD COLUMN IF NOT EXISTS notifications_enabled BOOLEAN NOT NULL DEFAULT TRUE")
         )
         await conn.execute(
+            text("ALTER TABLE users ADD COLUMN IF NOT EXISTS bot_access_allowed BOOLEAN NOT NULL DEFAULT FALSE")
+        )
+        await conn.execute(
+            text("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ NULL")
+        )
+        await conn.execute(
+            text("ALTER TABLE users ADD COLUMN IF NOT EXISTS access_updated_at TIMESTAMPTZ NULL")
+        )
+        await conn.execute(
             text(
                 """
                 DO $$
@@ -143,6 +152,9 @@ async def init_db() -> None:
         )
         await conn.execute(
             text("ALTER TABLE sale_broadcast_states ADD COLUMN IF NOT EXISTS selected_categories JSONB NOT NULL DEFAULT '[]'::jsonb")
+        )
+        await conn.execute(
+            text("ALTER TABLE sale_broadcast_states ADD COLUMN IF NOT EXISTS next_category VARCHAR(64)")
         )
         await conn.execute(
             text("ALTER TABLE sale_broadcast_states ADD COLUMN IF NOT EXISTS send_interval_seconds BIGINT NOT NULL DEFAULT 30")

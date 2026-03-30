@@ -5,7 +5,7 @@ import logging
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import delete, func, or_, select, text
+from sqlalchemy import delete, desc, func, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
@@ -29,10 +29,17 @@ async def upsert_user(session: AsyncSession, user_id: int, username: str | None)
     try:
         stmt = (
             pg_insert(User)
-            .values(id=user_id, username=username)
+            .values(
+                id=user_id,
+                username=username,
+                last_seen_at=func.now(),
+            )
             .on_conflict_do_update(
                 index_elements=[User.id],
-                set_={"username": username},
+                set_={
+                    "username": username,
+                    "last_seen_at": func.now(),
+                },
             )
         )
         await session.execute(stmt)
@@ -41,6 +48,57 @@ async def upsert_user(session: AsyncSession, user_id: int, username: str | None)
         logger.exception("upsert_user failed (user_id=%s)", user_id)
         await session.rollback()
         raise
+
+
+async def is_user_bot_allowed(session: AsyncSession, user_id: int) -> bool:
+    stmt = select(User.bot_access_allowed).where(User.id == user_id).limit(1)
+    res = await session.execute(stmt)
+    value = res.scalar_one_or_none()
+    return bool(value)
+
+
+async def set_user_bot_access(session: AsyncSession, user_id: int, allowed: bool) -> bool:
+    stmt = select(User).where(User.id == user_id).limit(1)
+    res = await session.execute(stmt)
+    user = res.scalar_one_or_none()
+    if user is None:
+        return False
+
+    user.bot_access_allowed = bool(allowed)
+    user.access_updated_at = datetime.now(timezone.utc)
+    await session.commit()
+    return True
+
+
+async def delete_user_for_admin(session: AsyncSession, user_id: int) -> bool:
+    stmt = delete(User).where(User.id == user_id)
+    result = await session.execute(stmt)
+    await session.commit()
+    return bool(result.rowcount)
+
+
+async def list_users_for_admin(
+    session: AsyncSession,
+    *,
+    search: str | None = None,
+    allowed: bool | None = None,
+) -> list[User]:
+    stmt = select(User)
+
+    if search:
+        query = search.strip()
+        if query:
+            conditions = [User.username.ilike(f"%{query}%")]
+            if query.isdigit():
+                conditions.append(User.id == int(query))
+            stmt = stmt.where(or_(*conditions))
+
+    if allowed is not None:
+        stmt = stmt.where(User.bot_access_allowed.is_(allowed))
+
+    stmt = stmt.order_by(desc(User.last_seen_at), desc(User.id))
+    res = await session.execute(stmt)
+    return list(res.scalars().all())
 
 
 async def get_user_notifications_enabled(session: AsyncSession, user_id: int) -> bool:
@@ -227,6 +285,7 @@ async def upsert_sale_broadcast_state(
     total_found: int,
     pending_ads: list[dict[str, Any]],
     selected_categories: list[str],
+    next_category: str | None,
     sent_olx_ids: list[str],
     send_interval_seconds: int,
 ) -> None:
@@ -242,6 +301,7 @@ async def upsert_sale_broadcast_state(
             total_found=total_found,
             pending_ads=pending_ads,
             selected_categories=selected_categories,
+            next_category=next_category,
             sent_olx_ids=sent_olx_ids,
             send_interval_seconds=send_interval_seconds,
         )
@@ -256,6 +316,7 @@ async def upsert_sale_broadcast_state(
                 "total_found": total_found,
                 "pending_ads": pending_ads,
                 "selected_categories": selected_categories,
+                "next_category": next_category,
                 "sent_olx_ids": sent_olx_ids,
                 "send_interval_seconds": send_interval_seconds,
             },

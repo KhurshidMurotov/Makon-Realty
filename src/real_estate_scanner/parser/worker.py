@@ -800,11 +800,38 @@ def _normalize_broadcast_categories(categories: list[str] | None) -> list[str]:
     return [category for category in category_order if category in selected]
 
 
-def _interleave_broadcast_payloads(payloads_by_category: dict[str, list[dict]]) -> list[dict]:
-    category_order = ("sale", "commercial_sale", "commercial_rent")
+def _normalize_next_broadcast_category(next_category: str | None, selected_categories: list[str]) -> str | None:
+    normalized = _normalize_broadcast_categories(selected_categories)
+    if not normalized:
+        return None
+    if next_category in normalized:
+        return next_category
+    return normalized[0]
+
+
+def _get_next_broadcast_category_after(current_category: str | None, selected_categories: list[str]) -> str | None:
+    normalized = _normalize_broadcast_categories(selected_categories)
+    if not normalized:
+        return None
+    if current_category not in normalized:
+        return normalized[0]
+    current_index = normalized.index(current_category)
+    return normalized[(current_index + 1) % len(normalized)]
+
+
+def _interleave_broadcast_payloads(
+    payloads_by_category: dict[str, list[dict]],
+    *,
+    selected_categories: list[str],
+    start_category: str | None,
+) -> list[dict]:
+    category_order = _normalize_broadcast_categories(selected_categories)
+    if start_category in category_order:
+        start_index = category_order.index(start_category)
+        category_order = category_order[start_index:] + category_order[:start_index]
     queues = {category: list(payloads_by_category.get(category, [])) for category in category_order}
     merged: list[dict] = []
-    while any(queues[category] for category in category_order):
+    while any(queues.get(category) for category in category_order):
         for category in category_order:
             if queues[category]:
                 merged.append(queues[category].pop(0))
@@ -814,14 +841,16 @@ def _interleave_broadcast_payloads(payloads_by_category: dict[str, list[dict]]) 
 async def _refresh_pending_broadcast_queue(
     session: AsyncSession,
     state: SaleBroadcastState,
-) -> tuple[list[dict], int]:
+) -> tuple[list[dict], int, str | None]:
     window_end = datetime.now(_LOCAL_TZ)
     window_start = window_end - timedelta(days=30)
     scanned_since = window_end - timedelta(hours=BROADCAST_RECENT_SEEN_HOURS)
     sent_ids = set(state.sent_olx_ids or [])
     payloads_by_category: dict[str, list[dict]] = {}
+    selected_categories = _normalize_broadcast_categories(list(state.selected_categories or []))
+    next_category = _normalize_next_broadcast_category(getattr(state, "next_category", None), selected_categories)
 
-    for category in _normalize_broadcast_categories(list(state.selected_categories or [])):
+    for category in selected_categories:
         rows = await get_recent_ads_raw(
             session,
             category=category,
@@ -840,8 +869,12 @@ async def _refresh_pending_broadcast_queue(
         category_payloads.sort(key=lambda item: _broadcast_payload_sort_key(item, window_start))
         payloads_by_category[category] = category_payloads
 
-    refreshed_queue = _interleave_broadcast_payloads(payloads_by_category)
-    return refreshed_queue, len(refreshed_queue)
+    refreshed_queue = _interleave_broadcast_payloads(
+        payloads_by_category,
+        selected_categories=selected_categories,
+        start_category=next_category,
+    )
+    return refreshed_queue, len(refreshed_queue), next_category
 
 
 async def build_apartments_sale_snapshot(*, limit: int = 200) -> list[ParsedAd]:
@@ -963,7 +996,14 @@ async def send_broadcast_step(*, bot: Bot, session: AsyncSession, state: SaleBro
     if not force and state.last_batch_at and (now - state.last_batch_at) < timedelta(seconds=send_interval_seconds):
         return False
 
-    async def _persist_state(*, current_state: SaleBroadcastState, is_active: bool, pending_ads: list[dict], sent_olx_ids: list[str]) -> None:
+    async def _persist_state(
+        *,
+        current_state: SaleBroadcastState,
+        is_active: bool,
+        pending_ads: list[dict],
+        sent_olx_ids: list[str],
+        next_category: str | None,
+    ) -> None:
         await upsert_sale_broadcast_state(
             session,
             user_id=current_state.user_id,
@@ -975,11 +1015,12 @@ async def send_broadcast_step(*, bot: Bot, session: AsyncSession, state: SaleBro
             total_found=current_state.total_found,
             pending_ads=pending_ads,
             selected_categories=list(current_state.selected_categories or []),
+            next_category=_normalize_next_broadcast_category(next_category, list(current_state.selected_categories or [])),
             sent_olx_ids=sent_olx_ids,
             send_interval_seconds=int(getattr(current_state, "send_interval_seconds", SEND_INTERVAL_SECONDS) or SEND_INTERVAL_SECONDS),
         )
 
-    pending_payloads, total_found = await _refresh_pending_broadcast_queue(session, state)
+    pending_payloads, total_found, next_category = await _refresh_pending_broadcast_queue(session, state)
     state.total_found = total_found
     if not pending_payloads:
         await _persist_state(
@@ -987,6 +1028,7 @@ async def send_broadcast_step(*, bot: Bot, session: AsyncSession, state: SaleBro
             is_active=False,
             pending_ads=[],
             sent_olx_ids=list(state.sent_olx_ids or []),
+            next_category=next_category,
         )
         return False
 
@@ -1009,6 +1051,7 @@ async def send_broadcast_step(*, bot: Bot, session: AsyncSession, state: SaleBro
             is_active=bool(rest_payloads),
             pending_ads=rest_payloads,
             sent_olx_ids=sent_olx_ids,
+            next_category=next_category,
         )
         return False
 
@@ -1027,11 +1070,16 @@ async def send_broadcast_step(*, bot: Bot, session: AsyncSession, state: SaleBro
     # Crash-safe ordering: persist "sent" state before the Telegram call so a restart
     # cannot replay the same ad to the same user.
     reserved_sent_olx_ids = [*sent_olx_ids, detailed_ad.olx_id]
+    reserved_next_category = _get_next_broadcast_category_after(
+        detailed_ad.ad_type,
+        list(state.selected_categories or []),
+    )
     await _persist_state(
         current_state=state,
         is_active=bool(rest_payloads),
         pending_ads=rest_payloads,
         sent_olx_ids=reserved_sent_olx_ids,
+        next_category=reserved_next_category,
     )
 
     try:
