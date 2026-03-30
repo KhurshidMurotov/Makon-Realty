@@ -156,6 +156,45 @@ def _get_valid_photo_urls(ad: ParsedAd) -> list[str]:
     return [url for url in urls if _looks_like_photo_url(url)]
 
 
+def _has_meaningful_description(text: str | None) -> bool:
+    cleaned = clean_text(text or "")
+    if not cleaned:
+        return False
+    lowered = cleaned.casefold()
+    blocked_tokens = ("подписаться", "subscribe", "посмотреть номер", "показать телефон")
+    return len(cleaned) >= 80 and not any(token in lowered for token in blocked_tokens)
+
+
+def _detail_enrichment_is_usable(listing_ad: ParsedAd, detailed_ad: ParsedAd) -> bool:
+    listing_photo_count = len(_get_valid_photo_urls(listing_ad))
+    detail_photo_count = len(_get_valid_photo_urls(detailed_ad))
+
+    improved_fields = any(
+        (
+            listing_ad.rooms is None and detailed_ad.rooms is not None,
+            listing_ad.area is None and detailed_ad.area is not None,
+            listing_ad.floor is None and detailed_ad.floor is not None,
+            listing_ad.total_floors is None and detailed_ad.total_floors is not None,
+            not listing_ad.author_name and bool(detailed_ad.author_name),
+            not listing_ad.owner_type and bool(detailed_ad.owner_type),
+            not listing_ad.seller_phone and bool(detailed_ad.seller_phone),
+            not listing_ad.published_at and bool(detailed_ad.published_at),
+            not listing_ad.district and bool(detailed_ad.district),
+            detail_photo_count > listing_photo_count,
+            _has_meaningful_description(detailed_ad.description) and detailed_ad.description != listing_ad.description,
+        )
+    )
+    if improved_fields:
+        return True
+
+    has_structure = any(
+        value is not None for value in (detailed_ad.rooms, detailed_ad.area, detailed_ad.floor, detailed_ad.total_floors)
+    )
+    has_contacts = bool(detailed_ad.author_name or detailed_ad.owner_type or detailed_ad.seller_phone)
+    has_enough_photos = detail_photo_count >= 1
+    return has_enough_photos and (has_structure or has_contacts)
+
+
 def clean_text(text: str) -> str:
     if not text:
         return text
@@ -615,6 +654,18 @@ async def _refresh_pending_broadcast_queue(
     payloads_by_category: dict[str, list[dict]] = {}
     selected_categories = _normalize_broadcast_categories(list(state.selected_categories or []))
     next_category = _normalize_next_broadcast_category(getattr(state, "next_category", None), selected_categories)
+    existing_queue = list(state.pending_ads or [])
+    existing_order: list[str] = []
+    existing_meta_by_id: dict[str, dict] = {}
+
+    for payload in existing_queue:
+        olx_id = payload.get("olx_id")
+        if not olx_id or olx_id in sent_ids or olx_id in existing_meta_by_id:
+            continue
+        existing_order.append(olx_id)
+        existing_meta_by_id[olx_id] = dict(payload)
+
+    fresh_payloads_by_id: dict[str, dict] = {}
 
     for category in selected_categories:
         rows = await get_recent_ads_raw(
@@ -632,11 +683,32 @@ async def _refresh_pending_broadcast_queue(
             prepared_payload = dict(payload)
             prepared_payload["details_loaded"] = False
             category_payloads.append(prepared_payload)
+            fresh_payloads_by_id[olx_id] = prepared_payload
         category_payloads.sort(key=lambda item: _broadcast_payload_sort_key(item, window_start))
         payloads_by_category[category] = category_payloads
 
-    refreshed_queue = _interleave_broadcast_payloads(
-        payloads_by_category,
+    preserved_queue: list[dict] = []
+    preserved_ids: set[str] = set()
+    for olx_id in existing_order:
+        fresh_payload = fresh_payloads_by_id.get(olx_id)
+        if not fresh_payload:
+            continue
+        merged_payload = dict(fresh_payload)
+        existing_payload = existing_meta_by_id.get(olx_id, {})
+        for key in ("detail_retry_count",):
+            if key in existing_payload:
+                merged_payload[key] = existing_payload[key]
+        preserved_queue.append(merged_payload)
+        preserved_ids.add(olx_id)
+
+    remaining_payloads_by_category: dict[str, list[dict]] = {}
+    for category, payloads in payloads_by_category.items():
+        remaining_payloads_by_category[category] = [
+            payload for payload in payloads if payload.get("olx_id") not in preserved_ids
+        ]
+
+    refreshed_queue = preserved_queue + _interleave_broadcast_payloads(
+        remaining_payloads_by_category,
         selected_categories=selected_categories,
         start_category=next_category,
     )
@@ -691,34 +763,69 @@ async def send_broadcast_step(*, bot: Bot, session: AsyncSession, state: SaleBro
     if not pending_payloads:
         return False
 
-    current_payload = pending_payloads[0]
-    rest_payloads = pending_payloads[1:]
     sent_olx_ids = list(state.sent_olx_ids or [])
-    ad = _deserialize_parsed_ad(current_payload)
+    deferred_payloads: list[dict] = []
+    current_payload: dict | None = None
+    detailed_ad: ParsedAd | None = None
 
-    if ad.olx_id in sent_olx_ids:
-        logger.info(
-            "Broadcast queue dedupe skip: user_id=%s olx_id=%s already persisted as sent",
-            state.user_id,
-            ad.olx_id,
-        )
+    while pending_payloads:
+        current_payload = pending_payloads[0]
+        rest_payloads = pending_payloads[1:]
+        ad = _deserialize_parsed_ad(current_payload)
+
+        if ad.olx_id in sent_olx_ids:
+            logger.info(
+                "Broadcast queue dedupe skip: user_id=%s olx_id=%s already persisted as sent",
+                state.user_id,
+                ad.olx_id,
+            )
+            pending_payloads = rest_payloads
+            continue
+
+        if ad.details_loaded:
+            candidate_ad = ad
+        else:
+            try:
+                candidate_ad = await enrich_ad_with_details(ad)
+            except Exception:
+                logger.exception("broadcast enrich failed (user_id=%s, olx_id=%s)", state.user_id, ad.olx_id)
+                candidate_ad = ad
+
+        if not _detail_enrichment_is_usable(ad, candidate_ad):
+            retry_count = int(current_payload.get("detail_retry_count", 0) or 0) + 1
+            deferred_payload = dict(current_payload)
+            deferred_payload["detail_retry_count"] = retry_count
+            deferred_payload["details_loaded"] = False
+            deferred_payloads.append(deferred_payload)
+            logger.warning(
+                "Broadcast detail defer: user_id=%s olx_id=%s retry=%s photos=%s rooms=%s area=%s floor=%s total_floors=%s author=%s owner_type=%s",
+                state.user_id,
+                ad.olx_id,
+                retry_count,
+                len(_get_valid_photo_urls(candidate_ad)),
+                candidate_ad.rooms,
+                candidate_ad.area,
+                candidate_ad.floor,
+                candidate_ad.total_floors,
+                bool(candidate_ad.author_name),
+                bool(candidate_ad.owner_type),
+            )
+            pending_payloads = rest_payloads
+            continue
+
+        detailed_ad = candidate_ad
+        pending_payloads = rest_payloads
+        break
+
+    if detailed_ad is None or current_payload is None:
         await _persist_state(
             current_state=state,
-            is_active=bool(rest_payloads),
-            pending_ads=rest_payloads,
+            is_active=bool(deferred_payloads),
+            pending_ads=deferred_payloads,
             sent_olx_ids=sent_olx_ids,
             next_category=next_category,
         )
         return False
-
-    if ad.details_loaded:
-        detailed_ad = ad
-    else:
-        try:
-            detailed_ad = await enrich_ad_with_details(ad)
-        except Exception:
-            logger.exception("broadcast enrich failed (user_id=%s, olx_id=%s)", state.user_id, ad.olx_id)
-            detailed_ad = ad
 
     markup = _build_inline_link(detailed_ad)
     text = _build_html_notification(detailed_ad)
@@ -732,8 +839,8 @@ async def send_broadcast_step(*, bot: Bot, session: AsyncSession, state: SaleBro
     )
     await _persist_state(
         current_state=state,
-        is_active=bool(rest_payloads),
-        pending_ads=rest_payloads,
+        is_active=bool(pending_payloads or deferred_payloads),
+        pending_ads=[*pending_payloads, *deferred_payloads],
         sent_olx_ids=reserved_sent_olx_ids,
         next_category=reserved_next_category,
     )
