@@ -20,11 +20,13 @@ from real_estate_scanner.db.crud import (
     ad_scanned_within_hours,
     delete_expired_ads,
     get_recent_ads_raw,
+    is_user_bot_allowed,
     get_sale_broadcast_state,
     list_active_sale_broadcast_states,
     upsert_scanned_ad,
     upsert_sale_broadcast_state,
 )
+from real_estate_scanner.config import settings
 from real_estate_scanner.db.init_db import init_db
 from real_estate_scanner.db.models import SaleBroadcastState
 from real_estate_scanner.db.session import AsyncSessionLocal
@@ -816,6 +818,30 @@ async def send_broadcast_step(*, bot: Bot, session: AsyncSession, state: SaleBro
     state = latest_state
 
     if not state.is_active:
+        return False
+
+    if settings.ADMIN_PANEL_ENABLED and not await is_user_bot_allowed(session, state.user_id):
+        logger.warning(
+            "Broadcast deactivated by access policy: user_id=%s selected_categories=%s pending_ads=%s",
+            state.user_id,
+            list(state.selected_categories or []),
+            len(list(state.pending_ads or [])),
+        )
+        await upsert_sale_broadcast_state(
+            session,
+            user_id=state.user_id,
+            is_active=False,
+            started_at=state.started_at,
+            window_start=state.window_start,
+            window_end=state.window_end,
+            last_batch_at=state.last_batch_at,
+            total_found=int(state.total_found or len(state.pending_ads or [])),
+            pending_ads=list(state.pending_ads or []),
+            selected_categories=list(state.selected_categories or []),
+            next_category=getattr(state, "next_category", None),
+            sent_olx_ids=list(state.sent_olx_ids or []),
+            send_interval_seconds=int(getattr(state, "send_interval_seconds", SEND_INTERVAL_SECONDS) or SEND_INTERVAL_SECONDS),
+        )
         return False
 
     now = datetime.now(_LOCAL_TZ)
