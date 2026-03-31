@@ -342,6 +342,15 @@ async def upsert_scanned_ad(
     raw_details: dict[str, Any],
     image_url: str | None = None,
 ) -> None:
+    normalized_raw_details = dict(raw_details or {})
+    normalized_raw_details["olx_id"] = olx_id
+    normalized_raw_details["title"] = title
+    normalized_raw_details["price"] = price
+    normalized_raw_details["link"] = url
+    normalized_raw_details["image_url"] = image_url
+    normalized_raw_details["ad_type"] = category
+    normalized_raw_details["published_at"] = published_at.isoformat() if hasattr(published_at, "isoformat") and published_at else None
+
     stmt = (
         pg_insert(Ad)
         .values(
@@ -352,7 +361,7 @@ async def upsert_scanned_ad(
             published_at=published_at,
             url=url,
             category=category,
-            raw_details=raw_details,
+            raw_details=normalized_raw_details,
             scanned_at=func.now(),
             link=url,
             image_url=image_url,
@@ -366,7 +375,7 @@ async def upsert_scanned_ad(
                 "published_at": published_at,
                 "url": url,
                 "category": category,
-                "raw_details": raw_details,
+                "raw_details": normalized_raw_details,
                 "scanned_at": func.now(),
                 "link": url,
                 "image_url": image_url,
@@ -400,13 +409,13 @@ async def get_recent_ads_raw(
     payloads: list[dict[str, Any]] = []
     for row in rows:
         payload = dict(row.raw_details or {})
-        payload.setdefault("olx_id", row.olx_id)
-        payload.setdefault("title", row.title)
-        payload.setdefault("price", row.price)
-        payload.setdefault("link", row.url or row.link)
-        payload.setdefault("image_url", row.image_url)
-        payload.setdefault("ad_type", row.category)
-        payload.setdefault("published_at", row.published_at.isoformat() if row.published_at else None)
+        payload["olx_id"] = row.olx_id
+        payload["title"] = row.title
+        payload["price"] = row.price
+        payload["link"] = row.url or row.link
+        payload["image_url"] = row.image_url
+        payload["ad_type"] = row.category
+        payload["published_at"] = row.published_at.isoformat() if row.published_at else None
         payload.setdefault("details_loaded", False)
         payloads.append(payload)
     return payloads

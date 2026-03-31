@@ -46,7 +46,7 @@ COMMERCIAL_SALE_URL = "https://www.olx.uz/nedvizhimost/kommercheskie-pomeshcheni
 COMMERCIAL_RENT_URL = "https://www.olx.uz/nedvizhimost/kommercheskie-pomeshcheniya/arenda/tashkent/?currency=UYE"
 SEND_INTERVAL_SECONDS = 30
 WORKER_POLL_INTERVAL_SECONDS = 5
-SCRAPING_INTERVAL_SECONDS = 20 * 60
+SCRAPING_INTERVAL_SECONDS = 10 * 60
 BROADCAST_RECENT_SEEN_HOURS = 24
 PAGE_SCAN_MAX_PAGE = 25
 PAGE_SCAN_MIN_PAGE = 1
