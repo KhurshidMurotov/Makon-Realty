@@ -421,8 +421,12 @@ async def _toggle_category_subscription(message: Message, category: str) -> None
         next_category = _normalize_next_category(getattr(state, "next_category", None), selected_categories)
         sent_olx_ids = list(state.sent_olx_ids or []) if state else []
         send_interval_seconds = int(getattr(state, "send_interval_seconds", DEFAULT_SEND_INTERVAL_SECONDS) or DEFAULT_SEND_INTERVAL_SECONDS)
+        state_is_active = bool(state.is_active) if state else False
 
-        if category in selected_categories:
+        if not state_is_active:
+            selected_categories = [category]
+            action_text = f"Выбран раздел: {CATEGORY_LABELS[category]}"
+        elif category in selected_categories:
             selected_categories = [item for item in selected_categories if item != category]
             action_text = f"Раздел отключён: {CATEGORY_LABELS[category]}"
         else:
