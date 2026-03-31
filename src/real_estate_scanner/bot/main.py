@@ -156,6 +156,35 @@ class BotAccessMiddleware(BaseMiddleware):
         return None
 
 
+async def _ensure_user_has_access(message: Message) -> bool:
+    if message.from_user is None:
+        return False
+
+    async with AsyncSessionLocal() as session:
+        await upsert_user(
+            session=session,
+            user_id=message.from_user.id,
+            username=message.from_user.username,
+        )
+        if not settings.ADMIN_PANEL_ENABLED:
+            return True
+        is_allowed = await is_user_bot_allowed(session, message.from_user.id)
+
+    if is_allowed:
+        return True
+
+    logger.warning("Bot access denied: user_id=%s username=%s", message.from_user.id, message.from_user.username)
+    await message.answer(
+        ACCESS_DENIED_TEXT,
+        reply_markup=_keyboard_for_state(
+            selected_categories=[],
+            send_interval_seconds=DEFAULT_SEND_INTERVAL_SECONDS,
+            is_active=False,
+        ),
+    )
+    return False
+
+
 def _setup_logging() -> None:
     project_root = Path(__file__).resolve().parents[3]
     logs_dir = project_root / "logs"
@@ -638,11 +667,15 @@ async def _reset_user_history(message: Message) -> None:
 
 @router.message(Command("reset"))
 async def reset_handler(message: Message) -> None:
+    if not await _ensure_user_has_access(message):
+        return
     await _reset_user_history(message)
 
 
 @router.message(CommandStart())
 async def start_handler(message: Message) -> None:
+    if not await _ensure_user_has_access(message):
+        return
     logger.info("start_handler: from_id=%s username=%s", message.from_user.id, message.from_user.username)
     async with AsyncSessionLocal() as session:
         await upsert_user(session=session, user_id=message.from_user.id, username=message.from_user.username)
@@ -749,6 +782,8 @@ async def _stop_broadcast(message: Message) -> None:
 
 @router.message(F.text)
 async def keyboard_handler(message: Message) -> None:
+    if not await _ensure_user_has_access(message):
+        return
     normalized_text = _strip_button_prefix(message.text)
     if normalized_text in BUTTON_TO_CATEGORY:
         await _toggle_category_subscription(message, BUTTON_TO_CATEGORY[normalized_text])
