@@ -36,8 +36,9 @@ _broadcast_starting_users: set[int] = set()
 BACKGROUND_TASK_RESTART_DELAY_SECONDS = 5
 BACKGROUND_MONITOR_INTERVAL_SECONDS = 300
 
-COMMERCIAL_SALE_BUTTON = "Коммерция | Продажа | Ташкент"
-COMMERCIAL_RENT_BUTTON = "Коммерция | Аренда | Ташкент"
+COMMERCIAL_BUTTON = "Коммерция | Продажа и Аренда | Ташкент"
+LEGACY_COMMERCIAL_SALE_BUTTON = "Коммерция | Продажа | Ташкент"
+LEGACY_COMMERCIAL_RENT_BUTTON = "Коммерция | Аренда | Ташкент"
 PAUSE_BUTTON = "Пауза"
 RESUME_BUTTON = "Продолжить"
 
@@ -53,10 +54,19 @@ CATEGORY_LABELS = {
     "commercial_sale": "Коммерция | Продажа | Ташкент",
     "commercial_rent": "Коммерция | Аренда | Ташкент",
 }
-BUTTON_TO_CATEGORY = {
+SECTION_TO_CATEGORIES = {
+    "sale": ["sale"],
+    "commercial": ["commercial_sale", "commercial_rent"],
+}
+SECTION_LABELS = {
+    "sale": APARTMENTS_BUTTON,
+    "commercial": COMMERCIAL_BUTTON,
+}
+BUTTON_TO_SECTION = {
     APARTMENTS_BUTTON: "sale",
-    COMMERCIAL_SALE_BUTTON: "commercial_sale",
-    COMMERCIAL_RENT_BUTTON: "commercial_rent",
+    COMMERCIAL_BUTTON: "commercial",
+    LEGACY_COMMERCIAL_SALE_BUTTON: "commercial",
+    LEGACY_COMMERCIAL_RENT_BUTTON: "commercial",
 }
 INTERVAL_BUTTONS = {
     INTERVAL_30_BUTTON: 30,
@@ -222,10 +232,15 @@ def _strip_button_prefix(text: str | None) -> str:
     return normalized
 
 
-def _category_button_text(category: str, selected_categories: list[str] | None) -> str:
+def _is_section_selected(section: str, selected_categories: list[str] | None) -> bool:
     normalized_selected = set(_normalize_selected_categories(selected_categories))
-    prefix = "✅ " if category in normalized_selected else "▫️ "
-    return f"{prefix}{CATEGORY_LABELS[category]}"
+    return any(category in normalized_selected for category in SECTION_TO_CATEGORIES[section])
+
+
+def _section_button_text(section: str, selected_categories: list[str] | None) -> str:
+    normalized_selected = set(_normalize_selected_categories(selected_categories))
+    prefix = "✅ " if any(category in normalized_selected for category in SECTION_TO_CATEGORIES[section]) else "▫️ "
+    return f"{prefix}{SECTION_LABELS[section]}"
 
 
 def _interval_button_text(seconds: int, current_seconds: int) -> str:
@@ -249,9 +264,8 @@ def _build_keyboard(
 ) -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=_category_button_text("sale", selected_categories))],
-            [KeyboardButton(text=_category_button_text("commercial_sale", selected_categories))],
-            [KeyboardButton(text=_category_button_text("commercial_rent", selected_categories))],
+            [KeyboardButton(text=_section_button_text("sale", selected_categories))],
+            [KeyboardButton(text=_section_button_text("commercial", selected_categories))],
             [KeyboardButton(text=_stop_button_text(selected_categories=selected_categories, is_active=is_active))],
             [
                 KeyboardButton(text=_interval_button_text(30, send_interval_seconds)),
@@ -277,7 +291,12 @@ def _payload_sort_key(payload: dict, fallback: datetime) -> datetime:
 
 def _normalize_selected_categories(categories: list[str] | None) -> list[str]:
     selected = set(categories or [])
-    return [category for category in CATEGORY_ORDER if category in selected]
+    normalized: list[str] = []
+    if "sale" in selected:
+        normalized.append("sale")
+    if "commercial_sale" in selected or "commercial_rent" in selected:
+        normalized.extend(["commercial_sale", "commercial_rent"])
+    return [category for category in CATEGORY_ORDER if category in normalized]
 
 
 def _normalize_next_category(next_category: str | None, selected_categories: list[str]) -> str | None:
@@ -424,17 +443,21 @@ def _build_status_message(
     send_interval_seconds: int,
 ) -> str:
     lines = ["Активные разделы:"]
-    for category in _normalize_selected_categories(selected_categories):
-        lines.append(f"{CATEGORY_LABELS[category]}: {counts.get(category, 0)}")
+    normalized_selected = _normalize_selected_categories(selected_categories)
+    if "sale" in normalized_selected:
+        lines.append(f"{APARTMENTS_BUTTON}: {counts.get('sale', 0)}")
+    if "commercial_sale" in normalized_selected or "commercial_rent" in normalized_selected:
+        commercial_count = counts.get("commercial_sale", 0) + counts.get("commercial_rent", 0)
+        lines.append(f"{COMMERCIAL_BUTTON}: {commercial_count}")
     lines.append(f"Интервал: {_format_interval_label(send_interval_seconds)}")
     lines.append(f"Всего в очереди: {sum(counts.values())}")
-    lines.append("Повторное нажатие на кнопку раздела убирает его из активных.")
+    lines.append("Можно включить квартиры, коммерцию или обе секции сразу. Повторное нажатие отключает секцию.")
     return "\n".join(lines)
 
 
-async def _toggle_category_subscription(message: Message, category: str) -> None:
+async def _toggle_category_subscription(message: Message, section: str) -> None:
     user_id = message.from_user.id
-    logger.info("toggle_category_subscription: user_id=%s category=%s", user_id, category)
+    logger.info("toggle_category_subscription: user_id=%s section=%s", user_id, section)
 
     if user_id in _broadcast_starting_users:
         await message.answer("Подготовка очереди уже идёт. Подождите пару секунд.")
@@ -450,18 +473,18 @@ async def _toggle_category_subscription(message: Message, category: str) -> None
         next_category = _normalize_next_category(getattr(state, "next_category", None), selected_categories)
         sent_olx_ids = list(state.sent_olx_ids or []) if state else []
         send_interval_seconds = int(getattr(state, "send_interval_seconds", DEFAULT_SEND_INTERVAL_SECONDS) or DEFAULT_SEND_INTERVAL_SECONDS)
-        state_is_active = bool(state.is_active) if state else False
 
-        if not state_is_active:
-            selected_categories = [category]
-            action_text = f"Выбран раздел: {CATEGORY_LABELS[category]}"
-        elif category in selected_categories:
-            selected_categories = [item for item in selected_categories if item != category]
-            action_text = f"Раздел отключён: {CATEGORY_LABELS[category]}"
+        section_categories = SECTION_TO_CATEGORIES[section]
+        section_label = SECTION_LABELS[section]
+        section_selected = all(category in selected_categories for category in section_categories)
+
+        if section_selected:
+            selected_categories = [category for category in selected_categories if category not in section_categories]
+            action_text = f"Раздел отключён: {section_label}"
         else:
-            selected_categories.append(category)
-            selected_categories = _normalize_selected_categories(selected_categories)
-            action_text = f"Раздел добавлен: {CATEGORY_LABELS[category]}"
+            selected_categories = _normalize_selected_categories([*selected_categories, *section_categories])
+            next_category = next_category if next_category in selected_categories else section_categories[0]
+            action_text = f"Раздел добавлен: {section_label}"
 
         if not selected_categories:
             await _persist_broadcast_state(
@@ -785,8 +808,8 @@ async def keyboard_handler(message: Message) -> None:
     if not await _ensure_user_has_access(message):
         return
     normalized_text = _strip_button_prefix(message.text)
-    if normalized_text in BUTTON_TO_CATEGORY:
-        await _toggle_category_subscription(message, BUTTON_TO_CATEGORY[normalized_text])
+    if normalized_text in BUTTON_TO_SECTION:
+        await _toggle_category_subscription(message, BUTTON_TO_SECTION[normalized_text])
         return
     if normalized_text in INTERVAL_BUTTONS:
         await _set_interval(message, INTERVAL_BUTTONS[normalized_text])
