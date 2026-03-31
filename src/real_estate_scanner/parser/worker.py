@@ -56,6 +56,7 @@ PAGE_SCAN_DELAY_RANGE_SECONDS = (7.5, 10.5)
 FEED_SWITCH_DELAY_RANGE_SECONDS = (11.0, 15.0)
 WORKER_HEARTBEAT_INTERVAL_SECONDS = 60
 WORKER_STEP_TIMEOUT_SECONDS = 180
+DETAIL_ENRICH_TIMEOUT_SECONDS = 45
 SCRAPER_CYCLE_TIMEOUT_SECONDS = 90 * 60
 is_initial_scan = True
 
@@ -911,7 +912,18 @@ async def send_broadcast_step(*, bot: Bot, session: AsyncSession, state: SaleBro
             candidate_ad = ad
         else:
             try:
-                candidate_ad = await enrich_ad_with_details(ad)
+                candidate_ad = await asyncio.wait_for(
+                    enrich_ad_with_details(ad),
+                    timeout=DETAIL_ENRICH_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "broadcast enrich timeout (user_id=%s, olx_id=%s, timeout=%ss)",
+                    state.user_id,
+                    ad.olx_id,
+                    DETAIL_ENRICH_TIMEOUT_SECONDS,
+                )
+                candidate_ad = ad
             except Exception:
                 logger.exception("broadcast enrich failed (user_id=%s, olx_id=%s)", state.user_id, ad.olx_id)
                 candidate_ad = ad
