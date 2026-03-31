@@ -26,13 +26,12 @@ from real_estate_scanner.db.crud import (
 )
 from real_estate_scanner.db.init_db import init_db
 from real_estate_scanner.db.session import AsyncSessionLocal
-from real_estate_scanner.parser.worker import APARTMENTS_BUTTON, STOP_BUTTON, run_scraper_loop, run_worker
+from real_estate_scanner.parser.worker import APARTMENTS_BUTTON, STOP_BUTTON, run_worker
 
 logger = logging.getLogger(__name__)
 router = Router()
 
 _LOCAL_TZ = ZoneInfo("Asia/Tashkent")
-_scraper_task: asyncio.Task | None = None
 _broadcast_starting_users: set[int] = set()
 BACKGROUND_TASK_RESTART_DELAY_SECONDS = 5
 BACKGROUND_MONITOR_INTERVAL_SECONDS = 300
@@ -115,14 +114,13 @@ async def _supervise_background_task(
         await asyncio.sleep(restart_delay_seconds)
 
 
-async def _background_monitor_loop(*, worker_task: asyncio.Task, scraper_task: asyncio.Task) -> None:
+async def _background_monitor_loop(*, worker_task: asyncio.Task) -> None:
     while True:
         try:
             await asyncio.sleep(BACKGROUND_MONITOR_INTERVAL_SECONDS)
             logger.info(
-                "Background monitor heartbeat: worker=%s scraper=%s",
+                "Background monitor heartbeat: worker=%s",
                 _describe_task_state(worker_task),
-                _describe_task_state(scraper_task),
             )
         except asyncio.CancelledError:
             logger.info("Background monitor cancelled")
@@ -663,7 +661,6 @@ async def stop_broadcast_handler(message: Message) -> None:
 
 
 async def main() -> None:
-    global _scraper_task
     _setup_logging()
 
     if not settings.BOT_TOKEN:
@@ -680,11 +677,8 @@ async def main() -> None:
     worker_task = asyncio.create_task(
         _supervise_background_task(name="worker", task_factory=lambda: run_worker(bot))
     )
-    _scraper_task = asyncio.create_task(
-        _supervise_background_task(name="scraper", task_factory=run_scraper_loop)
-    )
     monitor_task = asyncio.create_task(
-        _background_monitor_loop(worker_task=worker_task, scraper_task=_scraper_task)
+        _background_monitor_loop(worker_task=worker_task)
     )
     try:
         await dp.start_polling(bot)
@@ -694,12 +688,6 @@ async def main() -> None:
             await monitor_task
         except asyncio.CancelledError:
             pass
-        if _scraper_task is not None:
-            _scraper_task.cancel()
-            try:
-                await _scraper_task
-            except asyncio.CancelledError:
-                pass
         worker_task.cancel()
         try:
             await worker_task

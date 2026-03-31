@@ -4,7 +4,7 @@ import asyncio
 import logging
 import random
 import re
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta
 from html import escape
 from urllib.parse import urlsplit, urlunsplit
@@ -32,7 +32,7 @@ from real_estate_scanner.parser.olx_client import (
     ParsedAd,
     detect_last_page_for_search,
     enrich_ad_with_details,
-    fetch_ads_from_search,
+    fetch_ads_from_search_detailed,
 )
 
 logger = logging.getLogger(__name__)
@@ -56,6 +56,16 @@ WORKER_HEARTBEAT_INTERVAL_SECONDS = 60
 WORKER_STEP_TIMEOUT_SECONDS = 180
 SCRAPER_CYCLE_TIMEOUT_SECONDS = 90 * 60
 is_initial_scan = True
+
+
+@dataclass(slots=True)
+class ScraperCycleStats:
+    pages_attempted: int = 0
+    pages_with_ads: int = 0
+    empty_pages: int = 0
+    anti_bot_pages: int = 0
+    ads_found: int = 0
+    ads_saved: int = 0
 
 
 def is_initial_scan_active() -> bool:
@@ -326,15 +336,25 @@ async def _scan_feed_page(
     window_end: datetime,
     per_page_limit: int,
     known_ids: set[str],
+    stats: ScraperCycleStats | None = None,
 ) -> list[ParsedAd]:
     collected: list[ParsedAd] = []
-    page_ads = await fetch_ads_from_search(
+    page_ads, diagnostics = await fetch_ads_from_search_detailed(
         url=url,
         ad_type=ad_type,
         city=city,
         limit=per_page_limit,
         page_number=page_number,
     )
+    if stats is not None:
+        stats.pages_attempted += 1
+        stats.ads_found += len(page_ads)
+        if diagnostics.blocked:
+            stats.anti_bot_pages += 1
+        if page_ads:
+            stats.pages_with_ads += 1
+        else:
+            stats.empty_pages += 1
     if not page_ads:
         logger.info("OLX feed page returned no ads: ad_type=%s page=%s", ad_type, page_number)
         await _sleep_scraper_delay(PAGE_SCAN_DELAY_RANGE_SECONDS)
@@ -404,6 +424,8 @@ async def _scan_feed_page(
         ad_type,
         page_number,
     )
+    if stats is not None:
+        stats.ads_saved += page_saved_count
     await _sleep_scraper_delay(PAGE_SCAN_DELAY_RANGE_SECONDS)
     return collected
 
@@ -458,7 +480,8 @@ async def _collect_ads_for_feed_pages(
 async def _run_interleaved_scraper_cycle(*, per_page_limit: int = 60) -> None:
     window_end = datetime.now(_LOCAL_TZ)
     window_start = window_end - timedelta(days=30)
-    await _cleanup_expired_db_ads()
+    deleted_count = await _cleanup_expired_db_ads()
+    stats = ScraperCycleStats()
 
     feeds = [
         ("sale", APARTMENTS_SALE_URL, "tashkent"),
@@ -536,12 +559,23 @@ async def _run_interleaved_scraper_cycle(*, per_page_limit: int = 60) -> None:
                     window_end=window_end,
                     per_page_limit=per_page_limit,
                     known_ids=known_ids_by_feed.setdefault(ad_type, set()),
+                    stats=stats,
                 )
                 if index < len(active_feeds):
                     await _sleep_scraper_delay(FEED_SWITCH_DELAY_RANGE_SECONDS)
 
     if is_initial_scan:
         finish_initial_scan()
+    logger.info(
+        "[SCRAPER] cycle summary: pages_attempted=%s pages_with_ads=%s empty_pages=%s anti_bot_pages=%s ads_found=%s ads_saved=%s deleted_old=%s",
+        stats.pages_attempted,
+        stats.pages_with_ads,
+        stats.empty_pages,
+        stats.anti_bot_pages,
+        stats.ads_found,
+        stats.ads_saved,
+        deleted_count,
+    )
 
 
 async def _send_ad_payload_with_retry(

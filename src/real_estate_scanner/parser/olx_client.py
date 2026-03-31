@@ -79,6 +79,14 @@ class ParsedAd:
     details_loaded: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class SearchFetchDiagnostics:
+    page_title: str | None = None
+    candidate_count: int = 0
+    blocked: bool = False
+    empty: bool = False
+
+
 _TASHKENT_DISTRICT_SLUGS: list[tuple[str, tuple[str, ...]]] = [
         (
             "mirzoulugbek",
@@ -1467,7 +1475,7 @@ async def detect_last_page_for_search(
         return None
 
 
-async def fetch_ads_from_search(
+async def fetch_ads_from_search_detailed(
     *,
     url: str,
     ad_type: str,
@@ -1476,7 +1484,7 @@ async def fetch_ads_from_search(
     price_from: int | None = None,
     price_to: int | None = None,
     page_number: int = 1,
-) -> list[ParsedAd]:
+) -> tuple[list[ParsedAd], SearchFetchDiagnostics]:
     """
     Асинхронно заходит на OLX страницу поиска и парсит последние карточки.
 
@@ -1485,6 +1493,7 @@ async def fetch_ads_from_search(
     """
     base_url = settings.OLX_BASE_URL
     ads: list[ParsedAd] = []
+    diagnostics = SearchFetchDiagnostics()
     headless_env = os.getenv("OLX_HEADLESS", "true").strip().lower()
     headless = headless_env in {"1", "true", "yes", "y", "on"}
 
@@ -1529,6 +1538,7 @@ async def fetch_ads_from_search(
                 except Exception:
                     await page.wait_for_timeout(1200)
 
+                page_title: str | None = None
                 try:
                     page_title = await page.title()
                     logger.info("Page title: %s", page_title)
@@ -1545,6 +1555,22 @@ async def fetch_ads_from_search(
                     page_number,
                     price_from,
                     price_to,
+                )
+                diagnostics = SearchFetchDiagnostics(
+                    page_title=page_title,
+                    candidate_count=len(candidates),
+                    blocked=bool(
+                        page_title
+                        and any(
+                            token in page_title
+                            for token in (
+                                "ERROR: The request could not be satisfied",
+                                "Access Denied",
+                                "Just a moment",
+                            )
+                        )
+                    ),
+                    empty=len(candidates) == 0,
                 )
 
                 if len(candidates) == 0:
@@ -1631,6 +1657,28 @@ async def fetch_ads_from_search(
             price_to,
         )
 
+    return ads, diagnostics
+
+
+async def fetch_ads_from_search(
+    *,
+    url: str,
+    ad_type: str,
+    city: str,
+    limit: int = 50,
+    price_from: int | None = None,
+    price_to: int | None = None,
+    page_number: int = 1,
+) -> list[ParsedAd]:
+    ads, _diagnostics = await fetch_ads_from_search_detailed(
+        url=url,
+        ad_type=ad_type,
+        city=city,
+        limit=limit,
+        price_from=price_from,
+        price_to=price_to,
+        page_number=page_number,
+    )
     return ads
 
 
