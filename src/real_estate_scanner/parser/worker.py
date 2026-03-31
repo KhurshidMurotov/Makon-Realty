@@ -241,6 +241,21 @@ def _detail_enrichment_is_usable(listing_ad: ParsedAd, detailed_ad: ParsedAd) ->
     return has_enough_photos and (has_structure or has_contacts)
 
 
+async def _persist_enriched_ad(session: AsyncSession, ad: ParsedAd) -> None:
+    await upsert_scanned_ad(
+        session,
+        olx_id=ad.olx_id,
+        title=ad.title,
+        price=ad.price,
+        currency="UYE",
+        published_at=ad.published_at,
+        url=ad.link,
+        category=ad.ad_type,
+        raw_details=_serialize_parsed_ad(ad),
+        image_url=ad.image_url,
+    )
+
+
 def clean_text(text: str) -> str:
     if not text:
         return text
@@ -898,6 +913,14 @@ async def send_broadcast_step(*, bot: Bot, session: AsyncSession, state: SaleBro
             continue
 
         detailed_ad = candidate_ad
+        try:
+            await _persist_enriched_ad(session, detailed_ad)
+        except Exception:
+            logger.exception(
+                "broadcast enrich persist failed (user_id=%s, olx_id=%s)",
+                state.user_id,
+                detailed_ad.olx_id,
+            )
         pending_payloads = rest_payloads
         break
 

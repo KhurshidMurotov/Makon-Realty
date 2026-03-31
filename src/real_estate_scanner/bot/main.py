@@ -38,6 +38,8 @@ BACKGROUND_MONITOR_INTERVAL_SECONDS = 300
 
 COMMERCIAL_SALE_BUTTON = "Коммерция | Продажа | Ташкент"
 COMMERCIAL_RENT_BUTTON = "Коммерция | Аренда | Ташкент"
+PAUSE_BUTTON = "Пауза"
+RESUME_BUTTON = "Продолжить"
 
 INTERVAL_30_BUTTON = "Раз в 30 секунд"
 INTERVAL_60_BUTTON = "Раз в 1 минуту"
@@ -63,6 +65,7 @@ INTERVAL_BUTTONS = {
 }
 
 ACCESS_DENIED_TEXT = "Доступ к боту пока не выдан. Напишите администратору и попросите добавить ваш Telegram ID в белый список."
+BUTTON_PREFIXES = ("✅ ", "▫️ ", "⏸ ", "▶ ")
 
 
 def _describe_task_state(task: asyncio.Task | None) -> str:
@@ -182,17 +185,49 @@ def _setup_logging() -> None:
     root_logger.addHandler(file_handler)
 
 
-def _build_keyboard() -> ReplyKeyboardMarkup:
+def _strip_button_prefix(text: str | None) -> str:
+    normalized = (text or "").strip()
+    for prefix in BUTTON_PREFIXES:
+        if normalized.startswith(prefix):
+            return normalized[len(prefix) :].strip()
+    return normalized
+
+
+def _category_button_text(category: str, selected_categories: list[str] | None) -> str:
+    normalized_selected = set(_normalize_selected_categories(selected_categories))
+    prefix = "✅ " if category in normalized_selected else "▫️ "
+    return f"{prefix}{CATEGORY_LABELS[category]}"
+
+
+def _interval_button_text(seconds: int, current_seconds: int) -> str:
+    base_label = next((label for label, value in INTERVAL_BUTTONS.items() if value == seconds), f"{seconds} сек.")
+    prefix = "✅ " if current_seconds == seconds else "▫️ "
+    return f"{prefix}{base_label}"
+
+
+def _stop_button_text(*, selected_categories: list[str] | None, is_active: bool) -> str:
+    normalized_selected = _normalize_selected_categories(selected_categories)
+    if not normalized_selected:
+        return STOP_BUTTON
+    return f"⏸ {PAUSE_BUTTON}" if is_active else f"▶ {RESUME_BUTTON}"
+
+
+def _build_keyboard(
+    *,
+    selected_categories: list[str] | None = None,
+    send_interval_seconds: int = DEFAULT_SEND_INTERVAL_SECONDS,
+    is_active: bool = False,
+) -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=APARTMENTS_BUTTON)],
-            [KeyboardButton(text=COMMERCIAL_SALE_BUTTON)],
-            [KeyboardButton(text=COMMERCIAL_RENT_BUTTON)],
-            [KeyboardButton(text=STOP_BUTTON)],
+            [KeyboardButton(text=_category_button_text("sale", selected_categories))],
+            [KeyboardButton(text=_category_button_text("commercial_sale", selected_categories))],
+            [KeyboardButton(text=_category_button_text("commercial_rent", selected_categories))],
+            [KeyboardButton(text=_stop_button_text(selected_categories=selected_categories, is_active=is_active))],
             [
-                KeyboardButton(text=INTERVAL_30_BUTTON),
-                KeyboardButton(text=INTERVAL_60_BUTTON),
-                KeyboardButton(text=INTERVAL_120_BUTTON),
+                KeyboardButton(text=_interval_button_text(30, send_interval_seconds)),
+                KeyboardButton(text=_interval_button_text(60, send_interval_seconds)),
+                KeyboardButton(text=_interval_button_text(120, send_interval_seconds)),
             ],
         ],
         resize_keyboard=True,
@@ -223,6 +258,19 @@ def _normalize_next_category(next_category: str | None, selected_categories: lis
     if next_category in normalized_selected:
         return next_category
     return normalized_selected[0]
+
+
+def _keyboard_for_state(
+    *,
+    selected_categories: list[str] | None,
+    send_interval_seconds: int,
+    is_active: bool,
+) -> ReplyKeyboardMarkup:
+    return _build_keyboard(
+        selected_categories=_normalize_selected_categories(selected_categories),
+        send_interval_seconds=send_interval_seconds,
+        is_active=is_active,
+    )
 
 
 def _format_interval_label(seconds: int) -> str:
@@ -397,7 +445,14 @@ async def _toggle_category_subscription(message: Message, category: str) -> None
                 window_end=None,
                 last_batch_at=None,
             )
-            await message.answer("Все разделы отключены.", reply_markup=_build_keyboard())
+            await message.answer(
+                "Все разделы отключены.",
+                reply_markup=_keyboard_for_state(
+                    selected_categories=[],
+                    send_interval_seconds=send_interval_seconds,
+                    is_active=False,
+                ),
+            )
             return
 
         queue, counts, window_start, window_end, next_category = await _build_queue_for_categories(
@@ -427,7 +482,11 @@ async def _toggle_category_subscription(message: Message, category: str) -> None
                 counts=counts,
                 send_interval_seconds=send_interval_seconds,
             ),
-            reply_markup=_build_keyboard(),
+            reply_markup=_keyboard_for_state(
+                selected_categories=selected_categories,
+                send_interval_seconds=send_interval_seconds,
+                is_active=bool(queue),
+            ),
         )
     finally:
         _broadcast_starting_users.discard(user_id)
@@ -468,7 +527,11 @@ async def _set_interval(message: Message, seconds: int) -> None:
     )
     await message.answer(
         f"Новый интервал отправки: {_format_interval_label(seconds)}.",
-        reply_markup=_build_keyboard(),
+        reply_markup=_keyboard_for_state(
+            selected_categories=selected_categories,
+            send_interval_seconds=seconds,
+            is_active=is_active,
+        ),
     )
 
 
@@ -497,7 +560,11 @@ async def _reset_user_history(message: Message) -> None:
         )
         await message.answer(
             "История рассылки очищена. Теперь можно заново выбрать разделы.",
-            reply_markup=_build_keyboard(),
+            reply_markup=_keyboard_for_state(
+                selected_categories=[],
+                send_interval_seconds=DEFAULT_SEND_INTERVAL_SECONDS,
+                is_active=False,
+            ),
         )
         return
 
@@ -523,7 +590,11 @@ async def _reset_user_history(message: Message) -> None:
         )
         await message.answer(
             "История отправленных объявлений очищена. Активных разделов сейчас нет.",
-            reply_markup=_build_keyboard(),
+            reply_markup=_keyboard_for_state(
+                selected_categories=[],
+                send_interval_seconds=send_interval_seconds,
+                is_active=False,
+            ),
         )
         return
 
@@ -553,7 +624,11 @@ async def _reset_user_history(message: Message) -> None:
             counts=counts,
             send_interval_seconds=send_interval_seconds,
         ),
-        reply_markup=_build_keyboard(),
+        reply_markup=_keyboard_for_state(
+            selected_categories=selected_categories,
+            send_interval_seconds=send_interval_seconds,
+            is_active=bool(queue),
+        ),
     )
 
 
@@ -569,32 +644,15 @@ async def start_handler(message: Message) -> None:
         await upsert_user(session=session, user_id=message.from_user.id, username=message.from_user.username)
     await message.answer(
         "Выберите разделы и интервал отправки. По умолчанию уведомления идут раз в 30 секунд.",
-        reply_markup=_build_keyboard(),
+        reply_markup=_keyboard_for_state(
+            selected_categories=[],
+            send_interval_seconds=DEFAULT_SEND_INTERVAL_SECONDS,
+            is_active=False,
+        ),
     )
 
 
-@router.message(F.text == APARTMENTS_BUTTON)
-async def start_apartments_handler(message: Message) -> None:
-    await _toggle_category_subscription(message, "sale")
-
-
-@router.message(F.text == COMMERCIAL_SALE_BUTTON)
-async def start_commercial_sale_handler(message: Message) -> None:
-    await _toggle_category_subscription(message, "commercial_sale")
-
-
-@router.message(F.text == COMMERCIAL_RENT_BUTTON)
-async def start_commercial_rent_handler(message: Message) -> None:
-    await _toggle_category_subscription(message, "commercial_rent")
-
-
-@router.message(F.text.in_(set(INTERVAL_BUTTONS)))
-async def interval_handler(message: Message) -> None:
-    await _set_interval(message, INTERVAL_BUTTONS[message.text])
-
-
-@router.message(F.text == STOP_BUTTON)
-async def stop_broadcast_handler(message: Message) -> None:
+async def _stop_broadcast(message: Message) -> None:
     user_id = message.from_user.id
     logger.info("stop_broadcast_handler: from_id=%s", user_id)
 
@@ -602,7 +660,14 @@ async def stop_broadcast_handler(message: Message) -> None:
         state = await get_sale_broadcast_state(session, user_id)
 
     if not state or not state.selected_categories:
-        await message.answer("Активных разделов сейчас нет.", reply_markup=_build_keyboard())
+        await message.answer(
+            "Активных разделов сейчас нет.",
+            reply_markup=_keyboard_for_state(
+                selected_categories=[],
+                send_interval_seconds=DEFAULT_SEND_INTERVAL_SECONDS,
+                is_active=False,
+            ),
+        )
         return
 
     selected_categories = _normalize_selected_categories(list(state.selected_categories or []))
@@ -624,7 +689,14 @@ async def stop_broadcast_handler(message: Message) -> None:
             window_end=state.window_end,
             last_batch_at=state.last_batch_at,
         )
-        await message.answer("Рассылка поставлена на паузу.", reply_markup=_build_keyboard())
+        await message.answer(
+            "Рассылка поставлена на паузу.",
+            reply_markup=_keyboard_for_state(
+                selected_categories=selected_categories,
+                send_interval_seconds=send_interval_seconds,
+                is_active=False,
+            ),
+        )
         return
 
     queue, counts, window_start, window_end, next_category = await _build_queue_for_categories(
@@ -654,10 +726,34 @@ async def stop_broadcast_handler(message: Message) -> None:
                 counts=counts,
                 send_interval_seconds=send_interval_seconds,
             ),
-            reply_markup=_build_keyboard(),
+            reply_markup=_keyboard_for_state(
+                selected_categories=selected_categories,
+                send_interval_seconds=send_interval_seconds,
+                is_active=True,
+            ),
         )
     else:
-        await message.answer("Новых объявлений для продолжения пока нет.", reply_markup=_build_keyboard())
+        await message.answer(
+            "Новых объявлений для продолжения пока нет.",
+            reply_markup=_keyboard_for_state(
+                selected_categories=selected_categories,
+                send_interval_seconds=send_interval_seconds,
+                is_active=False,
+            ),
+        )
+
+
+@router.message(F.text)
+async def keyboard_handler(message: Message) -> None:
+    normalized_text = _strip_button_prefix(message.text)
+    if normalized_text in BUTTON_TO_CATEGORY:
+        await _toggle_category_subscription(message, BUTTON_TO_CATEGORY[normalized_text])
+        return
+    if normalized_text in INTERVAL_BUTTONS:
+        await _set_interval(message, INTERVAL_BUTTONS[normalized_text])
+        return
+    if normalized_text in {STOP_BUTTON, PAUSE_BUTTON, RESUME_BUTTON}:
+        await _stop_broadcast(message)
 
 
 async def main() -> None:
