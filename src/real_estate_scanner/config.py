@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     # Used in later modules for URL building
     OLX_BASE_URL: str = "https://www.olx.uz"
 
+    # Optional proxy for OLX Playwright traffic
+    OLX_PROXY_SERVER: str | None = None
+    OLX_PROXY_USERNAME: str | None = None
+    OLX_PROXY_PASSWORD: str | None = None
+
     # Telegram Mini App URL (must be public HTTPS for Telegram)
     MINI_APP_URL: str = "https://khurshidmurotov.github.io/Real-Estate-Scanner/"
 

@@ -40,6 +40,21 @@ _RU_MONTHS = {
 }
 
 
+def _build_browser_launch_kwargs(*, headless: bool) -> dict[str, Any]:
+    launch_kwargs: dict[str, Any] = {"headless": headless}
+    proxy_server = (settings.OLX_PROXY_SERVER or "").strip()
+    if proxy_server:
+        proxy: dict[str, str] = {"server": proxy_server}
+        proxy_username = (settings.OLX_PROXY_USERNAME or "").strip()
+        proxy_password = (settings.OLX_PROXY_PASSWORD or "").strip()
+        if proxy_username:
+            proxy["username"] = proxy_username
+        if proxy_password:
+            proxy["password"] = proxy_password
+        launch_kwargs["proxy"] = proxy
+    return launch_kwargs
+
+
 @dataclass(frozen=True, slots=True)
 class ParsedAd:
     olx_id: str
@@ -1375,7 +1390,7 @@ async def detect_last_page_for_search(
             context = None
             page: Page | None = None
             try:
-                browser = await p.chromium.launch(headless=headless)
+                browser = await p.chromium.launch(**_build_browser_launch_kwargs(headless=headless))
                 context = await browser.new_context()
                 page = await context.new_page()
 
@@ -1488,7 +1503,7 @@ async def fetch_ads_from_search(
             context = None
             page: Page | None = None
             try:
-                browser = await p.chromium.launch(headless=headless)
+                browser = await p.chromium.launch(**_build_browser_launch_kwargs(headless=headless))
                 context = await browser.new_context()
                 page = await context.new_page()
 
@@ -1646,7 +1661,7 @@ async def fetch_ad_details(url: str, *, ad_type: str | None = None) -> dict[str,
             context = None
             page: Page | None = None
             try:
-                browser = await p.chromium.launch(headless=headless)
+                browser = await p.chromium.launch(**_build_browser_launch_kwargs(headless=headless))
                 context = await browser.new_context()
                 page = await context.new_page()
                 page.set_default_timeout(_DETAIL_PAGE_TIMEOUT_MS)

@@ -52,6 +52,9 @@ PAGE_SCAN_MAX_PAGE = 25
 PAGE_SCAN_MIN_PAGE = 1
 PAGE_SCAN_DELAY_RANGE_SECONDS = (7.5, 10.5)
 FEED_SWITCH_DELAY_RANGE_SECONDS = (11.0, 15.0)
+WORKER_HEARTBEAT_INTERVAL_SECONDS = 60
+WORKER_STEP_TIMEOUT_SECONDS = 180
+SCRAPER_CYCLE_TIMEOUT_SECONDS = 90 * 60
 is_initial_scan = True
 
 
@@ -918,28 +921,51 @@ async def send_broadcast_step(*, bot: Bot, session: AsyncSession, state: SaleBro
     return True
 
 
-async def _process_active_broadcasts(*, bot: Bot, session: AsyncSession) -> None:
+async def _process_active_broadcasts(*, bot: Bot, session: AsyncSession) -> tuple[int, int]:
     states = await list_active_sale_broadcast_states(session)
+    sent_count = 0
     for state in states:
         sent = await send_broadcast_step(bot=bot, session=session, state=state)
         if sent:
+            sent_count += 1
             logger.info("Broadcast step sent: user_id=%s", state.user_id)
+    return len(states), sent_count
 
 
 async def run_scraper_loop(*, interval_seconds: int = SCRAPING_INTERVAL_SECONDS) -> None:
     logger.info("Scraper loop started (interval=%ss)", interval_seconds)
     await init_db()
 
+    cycle_number = 0
     while True:
+        cycle_number += 1
+        cycle_started_at = datetime.now(_LOCAL_TZ)
         try:
-            logger.info("Scraper cycle started")
-            await _run_interleaved_scraper_cycle(per_page_limit=60)
-            logger.info("Scraper cycle finished")
+            logger.info("Scraper cycle started: cycle=%s", cycle_number)
+            await asyncio.wait_for(
+                _run_interleaved_scraper_cycle(per_page_limit=60),
+                timeout=SCRAPER_CYCLE_TIMEOUT_SECONDS,
+            )
+            duration_seconds = (datetime.now(_LOCAL_TZ) - cycle_started_at).total_seconds()
+            logger.info(
+                "Scraper cycle finished: cycle=%s duration=%.1fs next_run_in=%ss",
+                cycle_number,
+                duration_seconds,
+                interval_seconds,
+            )
         except asyncio.CancelledError:
             logger.info("Scraper loop cancelled")
             raise
+        except asyncio.TimeoutError:
+            duration_seconds = (datetime.now(_LOCAL_TZ) - cycle_started_at).total_seconds()
+            logger.error(
+                "Scraper cycle timeout: cycle=%s duration=%.1fs timeout=%ss",
+                cycle_number,
+                duration_seconds,
+                SCRAPER_CYCLE_TIMEOUT_SECONDS,
+            )
         except Exception:
-            logger.exception("Scraper loop failed")
+            logger.exception("Scraper loop failed (cycle=%s)", cycle_number)
 
         await asyncio.sleep(interval_seconds)
 
@@ -948,14 +974,36 @@ async def run_worker(bot: Bot, *, interval_seconds: int = WORKER_POLL_INTERVAL_S
     logger.info("Worker started (interval=%ss)", interval_seconds)
     await init_db()
 
+    last_heartbeat_at = datetime.now(_LOCAL_TZ)
+    tick_number = 0
     while True:
+        tick_number += 1
         try:
             async with AsyncSessionLocal() as session:
-                await _process_active_broadcasts(bot=bot, session=session)
+                active_states, sent_count = await asyncio.wait_for(
+                    _process_active_broadcasts(bot=bot, session=session),
+                    timeout=WORKER_STEP_TIMEOUT_SECONDS,
+                )
+            now = datetime.now(_LOCAL_TZ)
+            if sent_count or (now - last_heartbeat_at).total_seconds() >= WORKER_HEARTBEAT_INTERVAL_SECONDS:
+                logger.info(
+                    "Worker heartbeat: tick=%s active_states=%s sent=%s poll_interval=%ss",
+                    tick_number,
+                    active_states,
+                    sent_count,
+                    interval_seconds,
+                )
+                last_heartbeat_at = now
         except asyncio.CancelledError:
             logger.info("Worker cancelled")
             raise
+        except asyncio.TimeoutError:
+            logger.error(
+                "Worker loop timeout: tick=%s timeout=%ss",
+                tick_number,
+                WORKER_STEP_TIMEOUT_SECONDS,
+            )
         except Exception:
-            logger.exception("Worker loop failed")
+            logger.exception("Worker loop failed (tick=%s)", tick_number)
 
         await asyncio.sleep(interval_seconds)

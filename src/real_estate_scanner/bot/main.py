@@ -34,6 +34,8 @@ router = Router()
 _LOCAL_TZ = ZoneInfo("Asia/Tashkent")
 _scraper_task: asyncio.Task | None = None
 _broadcast_starting_users: set[int] = set()
+BACKGROUND_TASK_RESTART_DELAY_SECONDS = 5
+BACKGROUND_MONITOR_INTERVAL_SECONDS = 300
 
 COMMERCIAL_SALE_BUTTON = "Коммерция | Продажа | Ташкент"
 COMMERCIAL_RENT_BUTTON = "Коммерция | Аренда | Ташкент"
@@ -62,6 +64,69 @@ INTERVAL_BUTTONS = {
 }
 
 ACCESS_DENIED_TEXT = "Доступ к боту пока не выдан. Напишите администратору и попросите добавить ваш Telegram ID в белый список."
+
+
+def _describe_task_state(task: asyncio.Task | None) -> str:
+    if task is None:
+        return "missing"
+    if task.cancelled():
+        return "cancelled"
+    if task.done():
+        try:
+            exc = task.exception()
+        except asyncio.CancelledError:
+            return "cancelled"
+        if exc is None:
+            return "done"
+        return f"failed:{type(exc).__name__}"
+    return "running"
+
+
+async def _supervise_background_task(
+    *,
+    name: str,
+    task_factory: Callable[[], Awaitable[None]],
+    restart_delay_seconds: int = BACKGROUND_TASK_RESTART_DELAY_SECONDS,
+) -> None:
+    restart_count = 0
+    while True:
+        started_at = datetime.now(_LOCAL_TZ)
+        logger.info("Background supervisor starting task: name=%s restart=%s", name, restart_count)
+        try:
+            await task_factory()
+            runtime_seconds = (datetime.now(_LOCAL_TZ) - started_at).total_seconds()
+            logger.error(
+                "Background task exited unexpectedly: name=%s runtime=%.1fs restart_in=%ss",
+                name,
+                runtime_seconds,
+                restart_delay_seconds,
+            )
+        except asyncio.CancelledError:
+            logger.info("Background supervisor cancelled: name=%s", name)
+            raise
+        except Exception:
+            logger.exception(
+                "Background task crashed: name=%s restart_in=%ss",
+                name,
+                restart_delay_seconds,
+            )
+
+        restart_count += 1
+        await asyncio.sleep(restart_delay_seconds)
+
+
+async def _background_monitor_loop(*, worker_task: asyncio.Task, scraper_task: asyncio.Task) -> None:
+    while True:
+        try:
+            await asyncio.sleep(BACKGROUND_MONITOR_INTERVAL_SECONDS)
+            logger.info(
+                "Background monitor heartbeat: worker=%s scraper=%s",
+                _describe_task_state(worker_task),
+                _describe_task_state(scraper_task),
+            )
+        except asyncio.CancelledError:
+            logger.info("Background monitor cancelled")
+            raise
 
 
 class BotAccessMiddleware(BaseMiddleware):
@@ -612,11 +677,23 @@ async def main() -> None:
     dp.message.middleware(BotAccessMiddleware())
     dp.include_router(router)
 
-    worker_task = asyncio.create_task(run_worker(bot))
-    _scraper_task = asyncio.create_task(run_scraper_loop())
+    worker_task = asyncio.create_task(
+        _supervise_background_task(name="worker", task_factory=lambda: run_worker(bot))
+    )
+    _scraper_task = asyncio.create_task(
+        _supervise_background_task(name="scraper", task_factory=run_scraper_loop)
+    )
+    monitor_task = asyncio.create_task(
+        _background_monitor_loop(worker_task=worker_task, scraper_task=_scraper_task)
+    )
     try:
         await dp.start_polling(bot)
     finally:
+        monitor_task.cancel()
+        try:
+            await monitor_task
+        except asyncio.CancelledError:
+            pass
         if _scraper_task is not None:
             _scraper_task.cancel()
             try:
